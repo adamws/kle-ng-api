@@ -46,7 +46,7 @@ RUN cd /kicad/.local/share/kicad/9.0/3rdparty \
 
 # Install kbplacer Python package (still needed for subprocess calls)
 RUN pip3 install --upgrade pip \
-  && pip3 install "git+https://github.com/adamws/kicad-kbplacer@develop#egg=kbplacer[schematic]"
+  && pip3 install "git+https://github.com/adamws/kicad-kbplacer@8e16a4738a34b885f5fc54e9fa83b4f219de0694#egg=kbplacer[schematic]"
 
 # Copy Go binary from builder
 COPY --from=builder --chown=kicad /build/kicad-worker /kicad/
