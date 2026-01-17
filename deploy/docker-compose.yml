@@ -30,7 +30,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 128M
+          memory: 256M
     healthcheck:
       test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 30s
@@ -85,7 +85,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 64M
+          memory: 128M
 
   kicad-server:
     image: admwscki/keyboard-tools-server:${TAG:-latest}
@@ -106,7 +106,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 100M
+          memory: 256M
 
   kicad-worker:
     image: admwscki/keyboard-tools-kicad:${TAG:-latest}
@@ -119,7 +119,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 400M
+          memory: 512M
+      mode: replicated
+      replicas: 2
 
   redis:
     image: redis:6-alpine
@@ -127,7 +129,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 100M
+          memory: 128M
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
@@ -146,7 +148,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 400M
+          memory: 512M
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8888/"]
       interval: 30s
