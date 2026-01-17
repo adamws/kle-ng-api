@@ -66,7 +66,7 @@ services:
     command: server -dir=/data -filer -filer.port=8888 -master.peers=none
 
   asynqmon:
-    image: hibiken/asynqmon:latest
+    image: hibiken/asynqmon:0.7
     ports:
       - 8082:8082
     environment:

@@ -61,7 +61,7 @@ services:
           memory: 256M
 
   asynqmon:
-    image: hibiken/asynqmon:latest
+    image: hibiken/asynqmon:0.7
     restart: unless-stopped
     expose:
       - "8080"
