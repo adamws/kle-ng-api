@@ -10,7 +10,7 @@ fi
 
 SCRIPT_DIR="$(dirname "${0}")"
 
-rsync -avP --exclude="letsencrypt" --exclude="flower" --exclude=".env" \
+rsync -avP --exclude="letsencrypt" --exclude=".env" \
   ${SCRIPT_DIR}/ $SSH_USER@$SSH_HOST:/home/$SSH_USER/app
 
 ssh $SSH_USER@$SSH_HOST << EOF

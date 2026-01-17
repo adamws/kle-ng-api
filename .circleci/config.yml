@@ -101,7 +101,7 @@ jobs:
           steps:
             - add_ssh_keys:
                 fingerprints:
-                  - "9d:d0:f6:fc:1e:69:d1:9a:25:8f:f8:9b:cb:9d:6f:18"
+                  - "SHA256:1bbV+uigN9x6bHQJUTv+Omo4AwCFujdbhog5IuJeyFc"
             - run:
                 name: Deploy on remote server
                 command: |
