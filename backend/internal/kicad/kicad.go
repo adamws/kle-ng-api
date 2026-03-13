@@ -29,6 +29,7 @@ func RunKBPlacer(
 	routeRowsAndColumns bool,
 	switchFootprint string,
 	diodeFootprint string,
+	stabilizerFootprint string,
 	switchRotation int,
 	switchSide string,
 	diodeRotation int,
@@ -68,6 +69,15 @@ func RunKBPlacer(
 	// Format: --diode "D{} CUSTOM <x> <y> <rotation> <side>"
 	diodeArg := fmt.Sprintf("D{} CUSTOM %f %f %d %s", diodePositionX, diodePositionY, diodeRotation, diodeSide)
 	args = append(args, "--diode", diodeArg)
+
+	// Add stabilizer configuration
+	if stabilizerFootprint == "" {
+		args = append(args, "--no-stabilizers")
+	} else {
+		args = append(args, "--stabilizer-footprint", stabilizerFootprint)
+		stabilizerArg := fmt.Sprintf("ST{} CUSTOM 0 0 0 %s", switchSide)
+		args = append(args, "--additional-elements", stabilizerArg)
+	}
 
 	// Create command with context (allows cancellation if task times out)
 	cmd := exec.CommandContext(ctx, "python3", args...)
@@ -320,6 +330,7 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	// Parse settings
 	switchFootprintSetting, _ := settings["switchFootprint"].(string)
 	diodeFootprintSetting, _ := settings["diodeFootprint"].(string)
+	stabilizerFootprintSetting, _ := settings["stabilizerFootprint"].(string)
 	routing, _ := settings["routing"].(string)
 
 	// Extract switch configuration settings
@@ -391,7 +402,17 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	switchFootprint := kicad3rdParty + SwitchesLibraryPath + switchLibNickname + ".pretty:" + switchFp
 	diodeFootprint := DiodeLibraryPath + diodeLibNickname + ".pretty:" + diodeFp
 
-	fmt.Printf("switch_footprint=%s diode_footprint=%s\n", switchFootprint, diodeFootprint)
+	// Resolve stabilizer footprint path (same library as switches) when provided
+	stabilizerFootprint := ""
+	if stabilizerFootprintSetting != "" {
+		stabParts := strings.SplitN(stabilizerFootprintSetting, ":", 2)
+		if len(stabParts) != 2 {
+			return "", fmt.Errorf("%w: stabilizerFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
+		}
+		stabilizerFootprint = kicad3rdParty + SwitchesLibraryPath + stabParts[0] + ".pretty:" + stabParts[1]
+	}
+
+	fmt.Printf("switch_footprint=%s diode_footprint=%s stabilizer_footprint=%s\n", switchFootprint, diodeFootprint, stabilizerFootprint)
 
 	// Determine routing options
 	routeSwitchesWithDiodes := routing == "Switch-Diode only" || routing == "Full"
@@ -447,6 +468,7 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		routeRowsAndColumns,
 		switchFootprint,
 		diodeFootprint,
+		stabilizerFootprint,
 		switchRotationInt,
 		switchSide,
 		diodeRotationInt,
