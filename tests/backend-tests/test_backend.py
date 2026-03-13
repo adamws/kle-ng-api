@@ -358,6 +358,50 @@ def test_failure_includes_error_details(tmpdir, pcb_endpoint):
     logger.info(f"Error details received: {error_msg[:200]}")
 
 
+def test_invalid_stabilizer_footprint_format(tmpdir, pcb_endpoint):
+    """Test that invalid stabilizerFootprint format returns a descriptive error."""
+    layout_data = {"meta": {"name": "test"}, "keys": [{"x": 0, "y": 0}]}
+    layout_file = f"{tmpdir}/valid_layout.json"
+    with open(layout_file, "w") as f:
+        json.dump(layout_data, f)
+
+    with open(layout_file) as f:
+        layout_json = json.loads(f.read())
+
+    invalid_settings = dict(DEFAULT_SETTINGS)
+    invalid_settings["stabilizerFootprint"] = "InvalidFormatNoColon"  # Should be "lib:footprint"
+
+    request_data = {"layout": layout_json, "settings": invalid_settings}
+
+    results = [None]
+    run_pcb_task(pcb_endpoint, request_data, results, 0)
+
+    assert results[0]
+    task_done, task_result = results[0][1], results[0][2]
+    assert task_done == True, "Task should complete (with failure)"
+
+    assert task_result.get("error") is not None, "Expected error field in task result"
+    error_msg = str(task_result.get("error"))
+
+    assert (
+        "footprint" in error_msg.lower() or "format" in error_msg.lower()
+    ), f"Expected footprint format error, got: {error_msg}"
+
+    logger.info(f"Stabilizer footprint format error: {error_msg[:200]}")
+
+
+def test_explicit_no_stabilizer_footprint(request, tmpdir, pcb_endpoint):
+    """Test that explicitly passing empty stabilizerFootprint triggers --no-stabilizers path."""
+    filename = request.module.__file__
+    test_dir, _ = os.path.splitext(filename)
+    layout_file = f"{test_dir}/2x2_internal.json"
+
+    settings = dict(DEFAULT_SETTINGS)
+    settings["stabilizerFootprint"] = ""  # Explicitly empty - should add --no-stabilizers
+
+    layout_test_steps(tmpdir, pcb_endpoint, layout_file, settings)
+
+
 def test_invalid_footprint_format_error_details(tmpdir, pcb_endpoint):
     """Test that invalid footprint format errors include detailed information."""
     layout_file = f"{tmpdir}/valid_layout_invalid_footprint.json"
