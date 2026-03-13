@@ -46,6 +46,7 @@ func RunKBPlacer(
 		"--switch-footprint", switchFootprint,
 		"--diode-footprint", diodeFootprint,
 		"--layout", layoutPath,
+		"--layout-offset", "0 0",
 		"--log-level", "INFO",
 		"--max-keys", "150",
 	}
