@@ -46,6 +46,8 @@ func RunKBPlacer(
 		"--create-pcb-file",
 		"--switch-footprint", switchFootprint,
 		"--diode-footprint", diodeFootprint,
+		"--encoder-footprint", "/usr/share/kicad/footprints/Rotary_Encoder.pretty:RotaryEncoder_Alps_EC11E-Switch_Vertical_H20mm",
+		"--encoder-adjustment", "-7.5 -2.5",
 		"--layout", layoutPath,
 		"--layout-offset", "0 0",
 		"--log-level", "INFO",

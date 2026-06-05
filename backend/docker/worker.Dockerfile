@@ -14,7 +14,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o kicad-worker ./cmd/worker
 
 # Stage 2: Runtime with KiCad
-FROM admwscki/kicad-kbplacer-primary:9.0.6-noble
+FROM admwscki/kicad-kbplacer-primary:9.0.9-noble
 
 # Remove default user, create kicad user
 RUN userdel -r ubuntu
@@ -46,7 +46,7 @@ RUN cd /kicad/.local/share/kicad/9.0/3rdparty \
 
 # Install kbplacer Python package (still needed for subprocess calls)
 RUN pip3 install --upgrade pip \
-  && pip3 install "git+https://github.com/adamws/kicad-kbplacer@v0.16#egg=kbplacer[schematic]"
+  && pip3 install "git+https://github.com/adamws/kicad-kbplacer@v0.17#egg=kbplacer[schematic]"
 
 # Copy Go binary from builder
 COPY --from=builder --chown=kicad /build/kicad-worker /kicad/
