@@ -111,7 +111,7 @@ func RunKBPlacer(
 		logContent, readErr := os.ReadFile(logPath)
 		if readErr != nil {
 			// If we can't read the log, return the generic error
-			return fmt.Errorf("kbplacer failed: %w (unable to read log: %v)", err, readErr)
+			return fmt.Errorf("kbplacer failed: %w (unable to read log: %v)", cmdErr, readErr)
 		}
 
 		// Include log contents in error message for user feedback
@@ -121,7 +121,7 @@ func RunKBPlacer(
 			logStr = "...[truncated]...\n" + logStr[len(logStr)-5000:]
 		}
 
-		return fmt.Errorf("kbplacer failed: %w\n\nBuild log:\n%s", err, logStr)
+		return fmt.Errorf("kbplacer failed: %w\n\nBuild log:\n%s", cmdErr, logStr)
 	}
 
 	return nil
