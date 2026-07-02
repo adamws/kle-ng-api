@@ -21,5 +21,5 @@ Set up Python environment and run pytest:
 python -m venv .env
 . .env/bin/activate
 pip install -r requirements.txt
-pytest --backend-test-host=http://localhost:8080
+python -m pytest --backend-test-host=http://localhost:8080
 ```
