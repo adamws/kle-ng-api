@@ -215,7 +215,9 @@ def test_layout_with_various_key_sizes(request, tmpdir, pcb_endpoint):
     test_dir, _ = os.path.splitext(filename)
     layout_file = f"{test_dir}/sizes_internal.json"
 
-    layout_test_steps(tmpdir, pcb_endpoint, layout_file, DEFAULT_SETTINGS)
+    settings = dict(DEFAULT_SETTINGS)
+    settings["stabilizerFootprint"] = "Mounting_Keyboard_Stabilizer:Stabilizer_Cherry_MX_{:.2f}u"
+    layout_test_steps(tmpdir, pcb_endpoint, layout_file, settings)
 
 
 def test_layout_with_non_default_key_distance(request, tmpdir, pcb_endpoint):
