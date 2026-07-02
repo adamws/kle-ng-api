@@ -56,7 +56,7 @@ services:
       - 6379:6379
 
   s3:
-    image: chrislusf/seaweedfs:4.02
+    image: chrislusf/seaweedfs:4.37
     volumes:
       - s3_data:/data
     ports:

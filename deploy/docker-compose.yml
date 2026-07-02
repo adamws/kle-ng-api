@@ -138,7 +138,7 @@ services:
       start_period: 10s
 
   s3:
-    image: chrislusf/seaweedfs:4.02
+    image: chrislusf/seaweedfs:4.37
     restart: unless-stopped
     volumes:
       - s3_data:/data
