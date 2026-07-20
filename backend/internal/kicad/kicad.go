@@ -20,66 +20,129 @@ const (
 	DiodeLibraryPath    = "/usr/share/kicad/footprints/"
 )
 
-// RunKBPlacer runs the kbplacer tool to generate KiCad PCB and schematic files
-func RunKBPlacer(
-	ctx context.Context,
-	pcbPath string,
-	layoutPath string,
-	routeSwitchesWithDiodes bool,
-	routeRowsAndColumns bool,
-	switchFootprint string,
-	diodeFootprint string,
-	stabilizerFootprint string,
-	switchRotation int,
-	switchSide string,
-	diodeRotation int,
-	diodeSide string,
-	diodePositionX float64,
-	diodePositionY float64,
-	logPath string,
-) error {
-	// Build command arguments
+// KBPlacerOptions holds the configuration used to build a kbplacer invocation.
+type KBPlacerOptions struct {
+	PCBPath                 string
+	LayoutPath              string
+	RouteSwitchesWithDiodes bool
+	RouteRowsAndColumns     bool
+	SwitchFootprint         string
+	DiodeFootprint          string
+	StabilizerFootprint     string
+	SwitchRotation          int
+	SwitchSide              string
+	DiodeRotation           int
+	DiodeSide               string
+	DiodePositionX          float64
+	DiodePositionY          float64
+
+	// LED chain options. LedFootprint/LedCapacitorFootprint are shared between
+	// the PCB (CreateLedPcbElements) and schematic (CreateLedSchFile) paths.
+	CreateLedPcbElements  bool
+	CreateLedSchFile      bool
+	LedFootprint          string
+	LedCapacitorFootprint string
+	SkipLedDecoupling     bool
+
+	LedRotation  int
+	LedSide      string
+	LedPositionX float64
+	LedPositionY float64
+
+	LedCapacitorRotation  int
+	LedCapacitorSide      string
+	LedCapacitorPositionX float64
+	LedCapacitorPositionY float64
+}
+
+func buildKBPlacerArgs(opts KBPlacerOptions) []string {
 	args := []string{
 		"-m", "kbplacer",
-		"--pcb-file", pcbPath,
+		"--pcb-file", opts.PCBPath,
 		"--create-sch-file",
 		"--create-pcb-file",
-		"--switch-footprint", switchFootprint,
-		"--diode-footprint", diodeFootprint,
+		"--switch-footprint", opts.SwitchFootprint,
+		"--diode-footprint", opts.DiodeFootprint,
 		"--encoder-footprint", "/usr/share/kicad/footprints/Rotary_Encoder.pretty:RotaryEncoder_Alps_EC11E-Switch_Vertical_H20mm",
 		"--encoder-adjustment", "-7.5 -2.5",
-		"--layout", layoutPath,
+		"--layout", opts.LayoutPath,
 		"--layout-offset", "0 0",
 		"--log-level", "INFO",
 		"--max-keys", "150",
 	}
 
 	// Add conditional flags
-	if routeSwitchesWithDiodes {
+	if opts.RouteSwitchesWithDiodes {
 		args = append(args, "--route-switches-with-diodes")
 	}
-	if routeRowsAndColumns {
+	if opts.RouteRowsAndColumns {
 		args = append(args, "--route-rows-and-columns")
 	}
 
 	// Add switch configuration argument
 	// Format: --switch "SW{} <rotation> <side>"
-	switchArg := fmt.Sprintf("SW{} %d %s", switchRotation, switchSide)
+	switchArg := fmt.Sprintf("SW{} %d %s", opts.SwitchRotation, opts.SwitchSide)
 	args = append(args, "--switch", switchArg)
 
 	// Add diode configuration argument
 	// Format: --diode "D{} CUSTOM <x> <y> <rotation> <side>"
-	diodeArg := fmt.Sprintf("D{} CUSTOM %f %f %d %s", diodePositionX, diodePositionY, diodeRotation, diodeSide)
+	diodeArg := fmt.Sprintf("D{} CUSTOM %f %f %d %s", opts.DiodePositionX, opts.DiodePositionY, opts.DiodeRotation, opts.DiodeSide)
 	args = append(args, "--diode", diodeArg)
 
+	// --additional-elements is a ';' separated list controlling placement of
+	// non-switch footprints (stabilizers, LEDs, decoupling capacitors).
+	var additionalElements []string
+
 	// Add stabilizer configuration
-	if stabilizerFootprint == "" {
+	if opts.StabilizerFootprint == "" {
 		args = append(args, "--no-stabilizers")
 	} else {
-		args = append(args, "--stabilizer-footprint", stabilizerFootprint)
-		stabilizerArg := fmt.Sprintf("ST{} CUSTOM 0 0 0 %s", switchSide)
-		args = append(args, "--additional-elements", stabilizerArg)
+		args = append(args, "--stabilizer-footprint", opts.StabilizerFootprint)
+		additionalElements = append(additionalElements, fmt.Sprintf("ST{} CUSTOM 0 0 0 %s", opts.SwitchSide))
 	}
+
+	// LED chain: the footprint settings feed both the PCB and schematic builders.
+	if opts.CreateLedPcbElements || opts.CreateLedSchFile {
+		if opts.LedFootprint != "" {
+			args = append(args, "--led-footprint", opts.LedFootprint)
+		}
+		if opts.SkipLedDecoupling {
+			args = append(args, "--skip-led-decoupling")
+		} else if opts.LedCapacitorFootprint != "" {
+			args = append(args, "--led-capacitor-footprint", opts.LedCapacitorFootprint)
+		}
+	}
+	if opts.CreateLedPcbElements {
+		args = append(args, "--create-led-pcb-elements")
+		// Position one LED (and, unless skipped, one decoupling capacitor) per
+		// key, relative to the switch it belongs to.
+		ledArg := fmt.Sprintf("LED{} CUSTOM %f %f %d %s", opts.LedPositionX, opts.LedPositionY, opts.LedRotation, opts.LedSide)
+		additionalElements = append(additionalElements, ledArg)
+		if !opts.SkipLedDecoupling {
+			ledCapacitorArg := fmt.Sprintf("C{} CUSTOM %f %f %d %s", opts.LedCapacitorPositionX, opts.LedCapacitorPositionY, opts.LedCapacitorRotation, opts.LedCapacitorSide)
+			additionalElements = append(additionalElements, ledCapacitorArg)
+		}
+	}
+	if opts.CreateLedSchFile {
+		args = append(args, "--create-led-sch-file")
+		// The key-matrix and LED-chain sheets are bundled into one project. We
+		// run on KiCad 9, whose "flat" multi-sheet bundling is unavailable
+		// (KiCad 10.0+ only), so request the hierarchical strategy explicitly:
+		// a root .kicad_sch referencing both child sheets. This keeps output
+		// deterministic regardless of the KiCad version kbplacer auto-detects.
+		args = append(args, "--bundle-strategy", "hierarchical")
+	}
+
+	if len(additionalElements) > 0 {
+		args = append(args, "--additional-elements", strings.Join(additionalElements, ";"))
+	}
+
+	return args
+}
+
+// RunKBPlacer runs the kbplacer tool to generate KiCad PCB and schematic files
+func RunKBPlacer(ctx context.Context, opts KBPlacerOptions, logPath string) error {
+	args := buildKBPlacerArgs(opts)
 
 	// Create command with context (allows cancellation if task times out)
 	cmd := exec.CommandContext(ctx, "python3", args...)
@@ -314,6 +377,58 @@ func CreateLogDir(workDir string) (string, error) {
 	return absPath, nil
 }
 
+// parsePlacement extracts a CUSTOM element placement (rotation, side and X/Y
+// offset) from the settings map using the given camelCase field prefix, e.g.
+// "led" reads ledRotation/ledSide/ledPositionX/ledPositionY. Numbers arrive as
+// float64 from JSON; the rotation is truncated to an int. The returned error
+// names the offending field so callers can surface a precise message.
+func parsePlacement(settings map[string]interface{}, prefix string) (int, string, float64, float64, error) {
+	rotationKey := prefix + "Rotation"
+	sideKey := prefix + "Side"
+	xKey := prefix + "PositionX"
+	yKey := prefix + "PositionY"
+
+	rotationRaw, ok := settings[rotationKey]
+	if !ok {
+		return 0, "", 0, 0, fmt.Errorf("%w: %s", ErrMissingLedPlacement, rotationKey)
+	}
+	rotation, ok := rotationRaw.(float64)
+	if !ok {
+		return 0, "", 0, 0, fmt.Errorf("%w: %s must be a number", ErrInvalidLedPlacement, rotationKey)
+	}
+
+	sideRaw, ok := settings[sideKey]
+	if !ok {
+		return 0, "", 0, 0, fmt.Errorf("%w: %s", ErrMissingLedPlacement, sideKey)
+	}
+	side, ok := sideRaw.(string)
+	if !ok {
+		return 0, "", 0, 0, fmt.Errorf("%w: %s must be a string", ErrInvalidLedPlacement, sideKey)
+	}
+	if side != "FRONT" && side != "BACK" {
+		return 0, "", 0, 0, fmt.Errorf("%w: %s must be FRONT or BACK", ErrInvalidLedPlacement, sideKey)
+	}
+
+	xRaw, ok := settings[xKey]
+	if !ok {
+		return 0, "", 0, 0, fmt.Errorf("%w: %s", ErrMissingLedPlacement, xKey)
+	}
+	x, ok := xRaw.(float64)
+	if !ok {
+		return 0, "", 0, 0, fmt.Errorf("%w: %s must be a number", ErrInvalidLedPlacement, xKey)
+	}
+	yRaw, ok := settings[yKey]
+	if !ok {
+		return 0, "", 0, 0, fmt.Errorf("%w: %s", ErrMissingLedPlacement, yKey)
+	}
+	y, ok := yRaw.(float64)
+	if !ok {
+		return 0, "", 0, 0, fmt.Errorf("%w: %s must be a number", ErrInvalidLedPlacement, yKey)
+	}
+
+	return int(rotation), side, x, y, nil
+}
+
 // NewPCB is the main entry point for generating a KiCad PCB project
 func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface{}) (string, error) {
 	startTime := time.Now()
@@ -334,6 +449,28 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	diodeFootprintSetting, _ := settings["diodeFootprint"].(string)
 	stabilizerFootprintSetting, _ := settings["stabilizerFootprint"].(string)
 	routing, _ := settings["routing"].(string)
+
+	// LED chain settings (optional). A single toggle drives the whole chain:
+	// whenever the LED-chain schematic is requested, the matching PCB elements
+	// are generated too, so the board and schematic can never diverge.
+	createLedSchFile, _ := settings["createLedSchFile"].(bool)
+	createLedPcbElements := createLedSchFile
+	skipLedDecoupling, _ := settings["skipLedDecoupling"].(bool)
+	ledFootprintSetting, _ := settings["ledFootprint"].(string)
+	ledCapacitorFootprintSetting, _ := settings["ledCapacitorFootprint"].(string)
+
+	// LED and decoupling capacitor placement (CUSTOM positioning relative to the
+	// key). Only parsed/validated when the LED chain is enabled - see below.
+	var (
+		ledRotationInt          int
+		ledSide                 string
+		ledPositionX            float64
+		ledPositionY            float64
+		ledCapacitorRotationInt int
+		ledCapacitorSide        string
+		ledCapacitorPositionX   float64
+		ledCapacitorPositionY   float64
+	)
 
 	// Extract switch configuration settings
 	switchRotationRaw, ok := settings["switchRotation"]
@@ -414,6 +551,51 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		stabilizerFootprint = kicad3rdParty + SwitchesLibraryPath + stabParts[0] + ".pretty:" + stabParts[1]
 	}
 
+	// Resolve LED chain footprints (LED and decoupling capacitor live in the
+	// standard KiCad footprint library, same as the diode).
+	ledFootprint := ""
+	ledCapacitorFootprint := ""
+	if createLedSchFile {
+		// LED footprint is always required: the PCB elements are generated
+		// alongside the schematic and cannot be placed without it.
+		if ledFootprintSetting == "" {
+			return "", ErrMissingLedFootprint
+		}
+		ledParts := strings.SplitN(ledFootprintSetting, ":", 2)
+		if len(ledParts) != 2 {
+			return "", fmt.Errorf("%w: ledFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
+		}
+		ledFootprint = DiodeLibraryPath + ledParts[0] + ".pretty:" + ledParts[1]
+
+		// Decoupling capacitor is required unless decoupling is skipped.
+		if !skipLedDecoupling {
+			if ledCapacitorFootprintSetting == "" {
+				return "", ErrMissingLedCapacitorFootprint
+			}
+			capParts := strings.SplitN(ledCapacitorFootprintSetting, ":", 2)
+			if len(capParts) != 2 {
+				return "", fmt.Errorf("%w: ledCapacitorFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
+			}
+			ledCapacitorFootprint = DiodeLibraryPath + capParts[0] + ".pretty:" + capParts[1]
+		}
+
+		// LED placement is user-controlled: the footprint is positioned relative
+		// to its key using the provided offset, rotation and side.
+		ledRotationInt, ledSide, ledPositionX, ledPositionY, err = parsePlacement(settings, "led")
+		if err != nil {
+			return "", err
+		}
+
+		// The decoupling capacitor is only placed (and therefore only needs
+		// positioning) when decoupling is not skipped.
+		if !skipLedDecoupling {
+			ledCapacitorRotationInt, ledCapacitorSide, ledCapacitorPositionX, ledCapacitorPositionY, err = parsePlacement(settings, "ledCapacitor")
+			if err != nil {
+				return "", err
+			}
+		}
+	}
+
 	fmt.Printf("switch_footprint=%s diode_footprint=%s stabilizer_footprint=%s\n", switchFootprint, diodeFootprint, stabilizerFootprint)
 
 	// Determine routing options
@@ -462,23 +644,34 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	}
 
 	// Run kbplacer to generate PCB and schematic
-	if err := RunKBPlacer(
-		ctx,
-		pcbFile,
-		layoutFile,
-		routeSwitchesWithDiodes,
-		routeRowsAndColumns,
-		switchFootprint,
-		diodeFootprint,
-		stabilizerFootprint,
-		switchRotationInt,
-		switchSide,
-		diodeRotationInt,
-		diodeSide,
-		diodePositionX,
-		diodePositionY,
-		logPath,
-	); err != nil {
+	if err := RunKBPlacer(ctx, KBPlacerOptions{
+		PCBPath:                 pcbFile,
+		LayoutPath:              layoutFile,
+		RouteSwitchesWithDiodes: routeSwitchesWithDiodes,
+		RouteRowsAndColumns:     routeRowsAndColumns,
+		SwitchFootprint:         switchFootprint,
+		DiodeFootprint:          diodeFootprint,
+		StabilizerFootprint:     stabilizerFootprint,
+		SwitchRotation:          switchRotationInt,
+		SwitchSide:              switchSide,
+		DiodeRotation:           diodeRotationInt,
+		DiodeSide:               diodeSide,
+		DiodePositionX:          diodePositionX,
+		DiodePositionY:          diodePositionY,
+		CreateLedPcbElements:    createLedPcbElements,
+		CreateLedSchFile:        createLedSchFile,
+		LedFootprint:            ledFootprint,
+		LedCapacitorFootprint:   ledCapacitorFootprint,
+		SkipLedDecoupling:       skipLedDecoupling,
+		LedRotation:             ledRotationInt,
+		LedSide:                 ledSide,
+		LedPositionX:            ledPositionX,
+		LedPositionY:            ledPositionY,
+		LedCapacitorRotation:    ledCapacitorRotationInt,
+		LedCapacitorSide:        ledCapacitorSide,
+		LedCapacitorPositionX:   ledCapacitorPositionX,
+		LedCapacitorPositionY:   ledCapacitorPositionY,
+	}, logPath); err != nil {
 		return "", err
 	}
 

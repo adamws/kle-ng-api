@@ -95,6 +95,31 @@ def get_artifacts(tmpdir, backend, task_id):
                     f.write(chunk)
 
 
+def extract_schematic_svgs(tmpdir, expected_name="keyboard"):
+    """Extract the per-sheet schematic SVGs bundled in the result zip.
+
+    kicad-cli renders one SVG per schematic sheet into the project directory,
+    so multi-sheet projects (e.g. the LED chain: root + key-matrix + led-chain)
+    yield several. The additional sheets are written into tmpdir so they show up
+    in the HTML report. The root sheet (``<name>/<name>.svg``) is skipped here
+    because it is already surfaced as ``schematic.svg`` via the render endpoint -
+    extracting it too would duplicate it in the report. Returns the archive
+    names of all schematic SVGs found (including the root), so callers can assert
+    one SVG exists per schematic sheet.
+    """
+    svgs = []
+    root_svg = f"{expected_name}/{expected_name}.svg"
+    with zipfile.ZipFile(tmpdir / "result.zip", "r") as result:
+        for name in result.namelist():
+            if name.startswith(f"{expected_name}/") and name.endswith(".svg"):
+                svgs.append(name)
+                if name == root_svg:
+                    continue
+                with open(tmpdir / f"sheet-{os.path.basename(name)}", "wb") as f:
+                    f.write(result.read(name))
+    return svgs
+
+
 def run_pcb_task(backend, request_data, results, index):
     timeout_when_started = 180
     task_id = ""
@@ -176,6 +201,9 @@ def layout_test_steps(
 
     with zipfile.ZipFile(tmpdir / "result.zip", "r") as result:
         assert_zip_content(result, expected_name)
+
+    # Render each schematic sheet into the report (multi-sheet aware).
+    extract_schematic_svgs(tmpdir, expected_name)
 
 
 @pytest.mark.parametrize("layout", ["2x2_internal", "arisu_internal"])
@@ -275,6 +303,143 @@ def test_switch_diode_configurations(
         "diodePositionY": diode_y,
     }
     layout_test_steps(tmpdir, pcb_endpoint, layout_file, settings)
+
+
+# LED chain tests
+#
+# Standard KiCad library footprints used for the per-key LED chain. kbplacer
+# only supports SK6812MINI-E-pinout parts (pad 1=GND, 2=DIN, 3=VCC, 4=DOUT);
+# the stock LED_SK6812MINI_PLCC4 footprint has that pad numbering and is what
+# kbplacer's own suite uses on KiCad 9.
+LED_FOOTPRINT = "LED_SMD:LED_SK6812MINI_PLCC4_3.5x3.5mm_P1.75mm"
+LED_CAPACITOR_FOOTPRINT = "Capacitor_SMD:C_0402_1005Metric"
+
+
+def run_led_error_case(pcb_endpoint, settings, expected_substrings):
+    """Submit a task expected to fail validation and assert the error message."""
+    layout_json = {"meta": {"name": "test"}, "keys": [{"x": 0, "y": 0}]}
+    request_data = {"layout": layout_json, "settings": settings}
+
+    results = [None]
+    run_pcb_task(pcb_endpoint, request_data, results, 0)
+
+    assert results[0]
+    task_done, task_result = results[0][1], results[0][2]
+    assert task_done == True, "Task should complete (with failure)"
+
+    assert task_result.get("error") is not None, "Expected error field in task result"
+    error_msg = str(task_result.get("error"))
+    assert any(
+        s in error_msg or s.lower() in error_msg.lower() for s in expected_substrings
+    ), f"Expected error mentioning {expected_substrings}, got: {error_msg}"
+    logger.info(f"LED validation error: {error_msg[:200]}")
+
+
+def test_led_chain(request, tmpdir, pcb_endpoint):
+    """Test that createLedSchFile generates the LED-chain schematic sheet and
+    the matching per-key LED + decoupling capacitor board elements together."""
+    filename = request.module.__file__
+    test_dir, _ = os.path.splitext(filename)
+    layout_file = f"{test_dir}/2x2_internal.json"
+
+    settings = dict(DEFAULT_SETTINGS)
+
+    settings["createLedSchFile"] = True
+    settings["ledFootprint"] = LED_FOOTPRINT
+    settings["ledCapacitorFootprint"] = LED_CAPACITOR_FOOTPRINT
+
+    settings["ledRotation"] = 0
+    settings["ledSide"] = "BACK"
+    settings["ledPositionX"] = 0
+    settings["ledPositionY"] = 5.25
+    settings["ledCapacitorRotation"] = 0
+    settings["ledCapacitorSide"] = "BACK"
+    settings["ledCapacitorPositionX"] = 5
+    settings["ledCapacitorPositionY"] = 7
+
+    with open(layout_file) as f:
+        layout_json = json.loads(f.read())
+    request_data = {"layout": layout_json, "settings": settings}
+
+    results = [None]
+    run_pcb_task(pcb_endpoint, request_data, results, 0)
+    assert results[0]
+    task_id, task_done = results[0][0], results[0][1]
+    assert task_done == True, "Task failed"
+    get_artifacts(tmpdir, pcb_endpoint, task_id)
+
+    with zipfile.ZipFile(tmpdir / "result.zip", "r") as result:
+        # On KiCad 9 the sheets are bundled hierarchically: keyboard.kicad_sch
+        # is the root wrapper (checked by assert_zip_content) referencing two
+        # child sheets - the key matrix and the LED chain.
+        assert_zip_content(result, "keyboard")
+        names = result.namelist()
+        for child in [
+            "keyboard/keyboard-key-matrix.kicad_sch",
+            "keyboard/keyboard-led-chain.kicad_sch",
+        ]:
+            assert child in names, f"Expected {child}, got: {names}"
+
+    # This is the whole point of a multi-sheet project: every schematic sheet
+    # must be rendered to its own SVG, not just the hierarchical root.
+    sch_files = [
+        n for n in names if n.startswith("keyboard/") and n.endswith(".kicad_sch")
+    ]
+    svgs = extract_schematic_svgs(tmpdir, "keyboard")
+    logger.info(f"Schematic sheets: {sch_files}, rendered SVGs: {svgs}")
+    assert len(svgs) >= len(
+        sch_files
+    ), f"Expected an SVG for each schematic sheet; sheets={sch_files}, svgs={svgs}"
+
+
+def test_led_chain_skip_decoupling(request, tmpdir, pcb_endpoint):
+    """Test that skipLedDecoupling omits the per-LED decoupling capacitors while
+    still generating the LED chain."""
+    filename = request.module.__file__
+    test_dir, _ = os.path.splitext(filename)
+    layout_file = f"{test_dir}/2x2_internal.json"
+
+    settings = dict(DEFAULT_SETTINGS)
+    settings["createLedSchFile"] = True
+    settings["skipLedDecoupling"] = True
+    settings["ledFootprint"] = LED_FOOTPRINT
+    # ledCapacitorFootprint intentionally omitted - not required when skipping
+
+    settings["ledRotation"] = 0
+    settings["ledSide"] = "BACK"
+    settings["ledPositionX"] = 0
+    settings["ledPositionY"] = 5.25
+    # Capacitor placement not required either, since decoupling is skipped.
+
+    layout_test_steps(tmpdir, pcb_endpoint, layout_file, settings)
+
+
+def test_led_chain_missing_footprint(pcb_endpoint):
+    """Enabling the LED chain without an LED footprint returns an error."""
+    settings = dict(DEFAULT_SETTINGS)
+    settings["createLedSchFile"] = True
+    # ledFootprint intentionally omitted
+    run_led_error_case(pcb_endpoint, settings, ["ledFootprint", "led"])
+
+
+def test_led_chain_missing_capacitor_footprint(pcb_endpoint):
+    """Enabling the LED chain without a capacitor footprint (and without
+    skipLedDecoupling) returns an error."""
+    settings = dict(DEFAULT_SETTINGS)
+    settings["createLedSchFile"] = True
+    settings["ledFootprint"] = LED_FOOTPRINT
+    # ledCapacitorFootprint omitted and skipLedDecoupling not set
+    run_led_error_case(pcb_endpoint, settings, ["ledCapacitorFootprint", "capacitor"])
+
+
+def test_led_chain_missing_placement(pcb_endpoint):
+    """Enabling the LED chain without LED placement fields returns an error."""
+    settings = dict(DEFAULT_SETTINGS)
+    settings["createLedSchFile"] = True
+    settings["skipLedDecoupling"] = True  # avoid capacitor footprint requirement
+    settings["ledFootprint"] = LED_FOOTPRINT
+    # ledRotation/ledSide/ledPositionX/ledPositionY intentionally omitted
+    run_led_error_case(pcb_endpoint, settings, ["placement", "ledRotation"])
 
 
 def test_layout_with_name(request, tmpdir, pcb_endpoint):

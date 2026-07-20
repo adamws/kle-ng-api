@@ -17,26 +17,6 @@ const (
 	TaskTypeGenerateKicad = "generate_kicad_project"
 )
 
-// TaskRequest represents the structure of a KiCad project generation request
-type TaskRequest struct {
-	Layout   map[string]interface{} `json:"layout"`
-	Settings struct {
-		SwitchFootprint   string  `json:"switchFootprint"`
-		DiodeFootprint    string  `json:"diodeFootprint"`
-		Routing           string  `json:"routing"`
-		KeyDistance       string  `json:"keyDistance"`
-		ControllerCircuit string  `json:"controllerCircuit"`
-		// Switch configuration
-		SwitchRotation    int     `json:"switchRotation"`
-		SwitchSide        string  `json:"switchSide"`
-		// Diode configuration
-		DiodeRotation     int     `json:"diodeRotation"`
-		DiodeSide         string  `json:"diodeSide"`
-		DiodePositionX    float64 `json:"diodePositionX"`
-		DiodePositionY    float64 `json:"diodePositionY"`
-	} `json:"settings"`
-}
-
 // RegisterTasks registers all task handlers with the mux
 func (w *Worker) RegisterTasks() {
 	log.Println("Registering task: generate_kicad_project")

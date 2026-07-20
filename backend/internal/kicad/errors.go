@@ -16,10 +16,19 @@ var (
 	ErrMissingSwitchSide     = errors.New("missing required field: switchSide")
 
 	// Diode configuration errors
-	ErrInvalidDiodeRotation = errors.New("invalid diodeRotation: must be an integer")
-	ErrInvalidDiodeSide     = errors.New("invalid diodeSide: must be FRONT or BACK")
-	ErrMissingDiodeRotation = errors.New("missing required field: diodeRotation")
-	ErrMissingDiodeSide     = errors.New("missing required field: diodeSide")
+	ErrInvalidDiodeRotation  = errors.New("invalid diodeRotation: must be an integer")
+	ErrInvalidDiodeSide      = errors.New("invalid diodeSide: must be FRONT or BACK")
+	ErrMissingDiodeRotation  = errors.New("missing required field: diodeRotation")
+	ErrMissingDiodeSide      = errors.New("missing required field: diodeSide")
 	ErrMissingDiodePositionX = errors.New("missing required field: diodePositionX")
 	ErrMissingDiodePositionY = errors.New("missing required field: diodePositionY")
+
+	// LED chain configuration errors
+	ErrMissingLedFootprint          = errors.New("missing required field: ledFootprint (required when createLedSchFile is enabled)")
+	ErrMissingLedCapacitorFootprint = errors.New("missing required field: ledCapacitorFootprint (required when createLedSchFile is enabled unless skipLedDecoupling is set)")
+
+	// LED chain placement errors (LED and decoupling capacitor positioning).
+	// The offending field name is appended when the error is raised.
+	ErrMissingLedPlacement = errors.New("missing required placement field")
+	ErrInvalidLedPlacement = errors.New("invalid placement field")
 )
