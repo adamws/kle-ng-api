@@ -367,8 +367,8 @@ type workerDetail struct {
 	ID           string         `json:"id"`
 	Host         string         `json:"host"`
 	PID          int            `json:"pid"`
-	Concurrency  int            `json:"concurrency"`   // Max concurrent tasks for this worker
-	Started      string         `json:"started"`       // ISO 8601 timestamp
+	Concurrency  int            `json:"concurrency"` // Max concurrent tasks for this worker
+	Started      string         `json:"started"`     // ISO 8601 timestamp
 	Status       string         `json:"status"`
 	ActiveTasks  int            `json:"active_tasks"`  // Currently processing
 	IdleCapacity int            `json:"idle_capacity"` // Available task slots
@@ -506,19 +506,7 @@ func (a *App) KicadGetTaskStatus(w http.ResponseWriter, r *http.Request) {
 
 	case asynq.TaskStateCompleted:
 		response.TaskStatus = "SUCCESS"
-		// Parse final result
-		if len(taskInfo.Result) > 0 {
-			var progress common.Progress
-			if err := json.Unmarshal(taskInfo.Result, &progress); err == nil {
-				response.Result = map[string]interface{}{
-					"percentage": progress.Percentage,
-				}
-			} else {
-				response.Result = map[string]interface{}{"percentage": 100}
-			}
-		} else {
-			response.Result = map[string]interface{}{"percentage": 100}
-		}
+		response.Result = successResult(taskInfo.Result)
 
 	case asynq.TaskStateArchived:
 		// Archived tasks are either completed or failed
@@ -532,7 +520,7 @@ func (a *App) KicadGetTaskStatus(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// Archived successfully completed task
 			response.TaskStatus = "SUCCESS"
-			response.Result = map[string]interface{}{"percentage": 100}
+			response.Result = successResult(taskInfo.Result)
 		}
 
 	case asynq.TaskStateRetry:
@@ -729,6 +717,28 @@ func (a *App) FilerProxy(objectName string, contentDisposition string) http.Hand
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
 	}
+}
+
+// successResult builds the task_result payload for a completed task from the
+// worker's final result write. It always reports a percentage and, when the
+// worker recorded a file manifest, the "files" list so the frontend can preview
+// the generated renders and download the archive.
+func successResult(raw []byte) map[string]interface{} {
+	result := map[string]interface{}{"percentage": 100}
+	if len(raw) == 0 {
+		return result
+	}
+
+	var progress common.Progress
+	if err := json.Unmarshal(raw, &progress); err != nil {
+		return result
+	}
+
+	result["percentage"] = progress.Percentage
+	if progress.Files != nil {
+		result["files"] = progress.Files
+	}
+	return result
 }
 
 func sendErr(w http.ResponseWriter, code int, message string) {

@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"backend/internal/common"
 )
 
 // FilerUploader handles uploading files to SeaweedFS Filer
@@ -89,8 +91,11 @@ func (u *FilerUploader) UploadSVG(ctx context.Context, taskID, name, filePath st
 	return u.uploadFile(ctx, path, bytes.NewReader(fileData), "image/svg+xml")
 }
 
-// UploadToStorage uploads all project files to Filer
-func (u *FilerUploader) UploadToStorage(ctx context.Context, taskID, workDir string) error {
+// UploadToStorage uploads all project files to Filer: the result zip plus every
+// SVG render in the manifest. Each render was written to the logs directory as
+// "<name>.svg" by the generator, and is exposed at {taskID}/{name}.svg so the
+// /render/{name} endpoint can serve it.
+func (u *FilerUploader) UploadToStorage(ctx context.Context, taskID, workDir string, renders []common.RenderFile) error {
 	// Create ZIP archive in memory
 	zipBuffer, err := CreateZipInMemory(workDir)
 	if err != nil {
@@ -102,13 +107,11 @@ func (u *FilerUploader) UploadToStorage(ctx context.Context, taskID, workDir str
 		return err
 	}
 
-	// Upload SVG renders
+	// Upload SVG renders (PCB front/back and one per schematic sheet)
 	logPath := filepath.Join(workDir, "logs")
-	svgFiles := []string{"front", "back", "schematic"}
-
-	for _, name := range svgFiles {
-		svgPath := filepath.Join(logPath, name+".svg")
-		if err := u.UploadSVG(ctx, taskID, name, svgPath); err != nil {
+	for _, render := range renders {
+		svgPath := filepath.Join(logPath, render.Name+".svg")
+		if err := u.UploadSVG(ctx, taskID, render.Name, svgPath); err != nil {
 			return err
 		}
 	}

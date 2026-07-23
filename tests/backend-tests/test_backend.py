@@ -140,6 +140,9 @@ def run_pcb_task(backend, request_data, results, index):
                     status = r.json()["task_status"]
                     if status == "SUCCESS":
                         task_done = True
+                        # Capture the final result so callers can inspect the
+                        # generated-file manifest (task_result.files).
+                        task_result = r.json()["task_result"]
                         break
                     elif status == "PENDING":
                         # prefetched, waiting for execution, can reset timeout, if we are to long in
@@ -195,7 +198,7 @@ def layout_test_steps(
     run_pcb_task(pcb_endpoint, request_data, results, 0)
 
     assert results[0]
-    task_id, task_done = results[0][0], results[0][1]
+    task_id, task_done, task_result = results[0]
     assert task_done == True, "Task failed"
     get_artifacts(tmpdir, pcb_endpoint, task_id)
 
@@ -204,6 +207,14 @@ def layout_test_steps(
 
     # Render each schematic sheet into the report (multi-sheet aware).
     extract_schematic_svgs(tmpdir, expected_name)
+
+    # The SUCCESS result advertises the generated files. Every project has the
+    # PCB front/back renders and at least the root schematic render.
+    files = task_result.get("files")
+    assert files is not None, f"Expected 'files' manifest in task_result, got: {task_result}"
+    render_names = {r["name"] for r in files["renders"]}
+    assert {"front", "back", "schematic"} <= render_names, render_names
+    assert files["archive"] == f"{task_id}.zip", files["archive"]
 
 
 @pytest.mark.parametrize("layout", ["2x2_internal", "arisu_internal"])
@@ -364,7 +375,7 @@ def test_led_chain(request, tmpdir, pcb_endpoint):
     results = [None]
     run_pcb_task(pcb_endpoint, request_data, results, 0)
     assert results[0]
-    task_id, task_done = results[0][0], results[0][1]
+    task_id, task_done, task_result = results[0]
     assert task_done == True, "Task failed"
     get_artifacts(tmpdir, pcb_endpoint, task_id)
 
@@ -390,6 +401,36 @@ def test_led_chain(request, tmpdir, pcb_endpoint):
     assert len(svgs) >= len(
         sch_files
     ), f"Expected an SVG for each schematic sheet; sheets={sch_files}, svgs={svgs}"
+
+    # The SUCCESS result carries a manifest of generated files. For this
+    # multi-sheet project it must advertise the PCB renders plus one schematic
+    # render per sheet (root + key-matrix + led-chain).
+    files = task_result.get("files")
+    assert files is not None, f"Expected 'files' manifest in task_result, got: {task_result}"
+    renders = files["renders"]
+    render_names = {r["name"] for r in renders}
+    render_kinds = {r["kind"] for r in renders}
+    assert {"front", "back"} <= render_names, f"Missing PCB renders: {render_names}"
+    assert {"pcb-front", "pcb-back", "schematic"} <= render_kinds, render_kinds
+
+    schematic_names = {r["name"] for r in renders if r["kind"] == "schematic"}
+    assert "schematic" in schematic_names, f"Missing root schematic render: {schematic_names}"
+    # Child sheets are exposed under schematic-<sheet> names.
+    assert "schematic-key-matrix" in schematic_names, schematic_names
+    assert "schematic-led-chain" in schematic_names, schematic_names
+    # One schematic render per sheet in the project.
+    assert len(schematic_names) == len(sch_files), (schematic_names, sch_files)
+
+    # Every advertised render must be fetchable via the /render/<name> endpoint
+    # (this is the whole point: previews before downloading the zip).
+    for render in renders:
+        r = requests.get(
+            f"{pcb_endpoint}/{task_id}/render/{render['name']}", verify=False
+        )
+        assert r.status_code == 200, f"render {render['name']} -> {r.status_code}"
+        assert r.content.lstrip().startswith(
+            b"<?xml"
+        ) or b"<svg" in r.content[:512], f"render {render['name']} is not an SVG"
 
 
 def test_led_chain_skip_decoupling(request, tmpdir, pcb_endpoint):

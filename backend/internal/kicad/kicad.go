@@ -8,8 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"backend/internal/common"
 )
 
 // Constants for SVG export templates and library paths
@@ -280,8 +283,38 @@ func GenerateRender(pcbPath string, logPath string) error {
 	return nil
 }
 
-// GenerateSchematicImage exports schematic to SVG
-func GenerateSchematicImage(schematicPath string, logPath string) error {
+// slugifySheet normalizes a schematic sheet's display name into a URL-safe,
+// filename-style token: lowercased, with each run of non-alphanumeric
+// characters collapsed to a single hyphen and leading/trailing hyphens trimmed
+// (e.g. "Key Matrix" -> "key-matrix").
+func slugifySheet(name string) string {
+	var b strings.Builder
+	prevHyphen := false
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevHyphen = false
+		default:
+			if !prevHyphen {
+				b.WriteByte('-')
+				prevHyphen = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// GenerateSchematicImage exports the schematic to SVG. kicad-cli renders one SVG
+// per sheet into the project directory, so a hierarchical multi-sheet project
+// (e.g. the LED chain: root + key-matrix + led-chain) yields several files.
+//
+// Every sheet is copied into the logs directory under a distinct render name so
+// it can be uploaded and previewed individually. The root sheet keeps the
+// historical render name "schematic"; child sheets ("<project>-<sheet>") become
+// "schematic-<sheet>". The returned RenderFile list is ordered with the root
+// sheet first.
+func GenerateSchematicImage(schematicPath string, logPath string) ([]common.RenderFile, error) {
 	schematicDir := filepath.Dir(schematicPath)
 	logDir := filepath.Dir(logPath)
 
@@ -297,27 +330,68 @@ func GenerateSchematicImage(schematicPath string, logPath string) error {
 	// Capture output for error reporting
 	output, cmdErr := cmd.CombinedOutput()
 
-	// Check if output file was created
-	name := strings.TrimSuffix(filepath.Base(schematicPath), filepath.Ext(schematicPath))
-	expectedResult := filepath.Join(schematicDir, name+".svg")
+	// The root sheet is always named after the project; use it as the sanity
+	// check that the export produced something.
+	projectName := strings.TrimSuffix(filepath.Base(schematicPath), filepath.Ext(schematicPath))
+	rootResult := filepath.Join(schematicDir, projectName+".svg")
 
-	if _, err := os.Stat(expectedResult); os.IsNotExist(err) {
+	if _, err := os.Stat(rootResult); os.IsNotExist(err) {
 		outputStr := string(output)
 		if outputStr != "" && cmdErr != nil {
-			return fmt.Errorf("failed to generate schematic image: %w\nOutput:\n%s", cmdErr, outputStr)
+			return nil, fmt.Errorf("failed to generate schematic image: %w\nOutput:\n%s", cmdErr, outputStr)
 		} else if cmdErr != nil {
-			return fmt.Errorf("failed to generate schematic image: %w", cmdErr)
+			return nil, fmt.Errorf("failed to generate schematic image: %w", cmdErr)
 		}
-		return fmt.Errorf("failed to generate schematic image: output file not created")
+		return nil, fmt.Errorf("failed to generate schematic image: output file not created")
 	}
 
-	// Copy to logs directory
-	targetPath := filepath.Join(logDir, "schematic.svg")
-	if err := copyFile(expectedResult, targetPath); err != nil {
-		return fmt.Errorf("failed to copy schematic image: %w", err)
+	// Collect every sheet SVG kicad-cli produced. Only schematic sheets land in
+	// the project directory (the PCB front/back renders go to the logs dir), so
+	// a plain glob is safe here.
+	sheetSVGs, err := filepath.Glob(filepath.Join(schematicDir, "*.svg"))
+	if err != nil {
+		return nil, fmt.Errorf("failed to list schematic sheets: %w", err)
 	}
 
-	return nil
+	renders := make([]common.RenderFile, 0, len(sheetSVGs))
+	for _, svg := range sheetSVGs {
+		base := strings.TrimSuffix(filepath.Base(svg), ".svg")
+
+		// Map the sheet file name to a stable render name. kicad-cli names child
+		// SVGs after the sheet's display name (e.g. "keyboard-Key Matrix.svg"), so
+		// slugify it into a URL-safe, filename-style token ("key-matrix") that
+		// matches the corresponding "<project>-<sheet>.kicad_sch" file.
+		renderName := "schematic"
+		sheet := ""
+		if base != projectName {
+			sheet = slugifySheet(strings.TrimPrefix(base, projectName+"-"))
+			renderName = "schematic-" + sheet
+		}
+
+		// Copy into the logs directory under the render name so UploadToStorage
+		// can find it alongside the front/back renders.
+		targetPath := filepath.Join(logDir, renderName+".svg")
+		if err := copyFile(svg, targetPath); err != nil {
+			return nil, fmt.Errorf("failed to copy schematic sheet %q: %w", base, err)
+		}
+
+		renders = append(renders, common.RenderFile{
+			Name:  renderName,
+			Kind:  "schematic",
+			Sheet: sheet,
+		})
+	}
+
+	// Order the root sheet (empty Sheet) first, then child sheets by name, so the
+	// manifest is deterministic regardless of the glob order.
+	sort.SliceStable(renders, func(i, j int) bool {
+		if (renders[i].Sheet == "") != (renders[j].Sheet == "") {
+			return renders[i].Sheet == ""
+		}
+		return renders[i].Sheet < renders[j].Sheet
+	})
+
+	return renders, nil
 }
 
 // CreateWorkDir creates a temporary work directory with task ID prefix
@@ -429,19 +503,22 @@ func parsePlacement(settings map[string]interface{}, prefix string) (int, string
 	return int(rotation), side, x, y, nil
 }
 
-// NewPCB is the main entry point for generating a KiCad PCB project
-func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface{}) (string, error) {
+// NewPCB is the main entry point for generating a KiCad PCB project. It returns
+// the work directory and a manifest of the generated artifacts (PCB renders and
+// one SVG per schematic sheet) so the caller can upload them and report the list
+// of available files to the frontend.
+func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface{}) (string, *common.ProjectFiles, error) {
 	startTime := time.Now()
 
 	// Extract layout and settings from request
 	layout, ok := taskRequest["layout"].(map[string]interface{})
 	if !ok {
-		return "", ErrInvalidLayout
+		return "", nil, ErrInvalidLayout
 	}
 
 	settings, ok := taskRequest["settings"].(map[string]interface{})
 	if !ok {
-		return "", ErrInvalidSettings
+		return "", nil, ErrInvalidSettings
 	}
 
 	// Parse settings
@@ -475,63 +552,63 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	// Extract switch configuration settings
 	switchRotationRaw, ok := settings["switchRotation"]
 	if !ok {
-		return "", ErrMissingSwitchRotation
+		return "", nil, ErrMissingSwitchRotation
 	}
 	switchRotation, ok := switchRotationRaw.(float64) // JSON numbers come as float64
 	if !ok {
-		return "", ErrInvalidSwitchRotation
+		return "", nil, ErrInvalidSwitchRotation
 	}
 	switchRotationInt := int(switchRotation)
 
 	switchSide, ok := settings["switchSide"].(string)
 	if !ok {
-		return "", ErrMissingSwitchSide
+		return "", nil, ErrMissingSwitchSide
 	}
 	if switchSide != "FRONT" && switchSide != "BACK" {
-		return "", ErrInvalidSwitchSide
+		return "", nil, ErrInvalidSwitchSide
 	}
 
 	// Extract diode configuration settings
 	diodeRotationRaw, ok := settings["diodeRotation"]
 	if !ok {
-		return "", ErrMissingDiodeRotation
+		return "", nil, ErrMissingDiodeRotation
 	}
 	diodeRotation, ok := diodeRotationRaw.(float64) // JSON numbers come as float64
 	if !ok {
-		return "", ErrInvalidDiodeRotation
+		return "", nil, ErrInvalidDiodeRotation
 	}
 	diodeRotationInt := int(diodeRotation)
 
 	diodeSide, ok := settings["diodeSide"].(string)
 	if !ok {
-		return "", ErrMissingDiodeSide
+		return "", nil, ErrMissingDiodeSide
 	}
 	if diodeSide != "FRONT" && diodeSide != "BACK" {
-		return "", ErrInvalidDiodeSide
+		return "", nil, ErrInvalidDiodeSide
 	}
 
 	diodePositionX, ok := settings["diodePositionX"].(float64)
 	if !ok {
-		return "", ErrMissingDiodePositionX
+		return "", nil, ErrMissingDiodePositionX
 	}
 
 	diodePositionY, ok := settings["diodePositionY"].(float64)
 	if !ok {
-		return "", ErrMissingDiodePositionY
+		return "", nil, ErrMissingDiodePositionY
 	}
 
 	// Split footprint settings into library nickname and footprint name
 	// Format: "lib_nickname:footprint"
 	switchParts := strings.SplitN(switchFootprintSetting, ":", 2)
 	if len(switchParts) != 2 {
-		return "", fmt.Errorf("%w: switchFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
+		return "", nil, fmt.Errorf("%w: switchFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
 	}
 	switchLibNickname := switchParts[0]
 	switchFp := switchParts[1]
 
 	diodeParts := strings.SplitN(diodeFootprintSetting, ":", 2)
 	if len(diodeParts) != 2 {
-		return "", fmt.Errorf("%w: diodeFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
+		return "", nil, fmt.Errorf("%w: diodeFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
 	}
 	diodeLibNickname := diodeParts[0]
 	diodeFp := diodeParts[1]
@@ -546,7 +623,7 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	if stabilizerFootprintSetting != "" {
 		stabParts := strings.SplitN(stabilizerFootprintSetting, ":", 2)
 		if len(stabParts) != 2 {
-			return "", fmt.Errorf("%w: stabilizerFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
+			return "", nil, fmt.Errorf("%w: stabilizerFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
 		}
 		stabilizerFootprint = kicad3rdParty + SwitchesLibraryPath + stabParts[0] + ".pretty:" + stabParts[1]
 	}
@@ -559,22 +636,22 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		// LED footprint is always required: the PCB elements are generated
 		// alongside the schematic and cannot be placed without it.
 		if ledFootprintSetting == "" {
-			return "", ErrMissingLedFootprint
+			return "", nil, ErrMissingLedFootprint
 		}
 		ledParts := strings.SplitN(ledFootprintSetting, ":", 2)
 		if len(ledParts) != 2 {
-			return "", fmt.Errorf("%w: ledFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
+			return "", nil, fmt.Errorf("%w: ledFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
 		}
 		ledFootprint = DiodeLibraryPath + ledParts[0] + ".pretty:" + ledParts[1]
 
 		// Decoupling capacitor is required unless decoupling is skipped.
 		if !skipLedDecoupling {
 			if ledCapacitorFootprintSetting == "" {
-				return "", ErrMissingLedCapacitorFootprint
+				return "", nil, ErrMissingLedCapacitorFootprint
 			}
 			capParts := strings.SplitN(ledCapacitorFootprintSetting, ":", 2)
 			if len(capParts) != 2 {
-				return "", fmt.Errorf("%w: ledCapacitorFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
+				return "", nil, fmt.Errorf("%w: ledCapacitorFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
 			}
 			ledCapacitorFootprint = DiodeLibraryPath + capParts[0] + ".pretty:" + capParts[1]
 		}
@@ -583,7 +660,7 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		// to its key using the provided offset, rotation and side.
 		ledRotationInt, ledSide, ledPositionX, ledPositionY, err = parsePlacement(settings, "led")
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 
 		// The decoupling capacitor is only placed (and therefore only needs
@@ -591,7 +668,7 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		if !skipLedDecoupling {
 			ledCapacitorRotationInt, ledCapacitorSide, ledCapacitorPositionX, ledCapacitorPositionY, err = parsePlacement(settings, "ledCapacitor")
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
 		}
 	}
@@ -605,13 +682,13 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	// Create work directory
 	workDir, err := CreateWorkDir(taskID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	// Get project name from layout metadata
 	meta, ok := layout["meta"].(map[string]interface{})
 	if !ok {
-		return "", ErrInvalidLayoutMetadata
+		return "", nil, ErrInvalidLayoutMetadata
 	}
 	layoutName, _ := meta["name"].(string)
 	projectName := GetProjectName(layoutName)
@@ -619,13 +696,13 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	// Create project directory
 	projectFullPath, err := CreateKicadWorkDir(workDir, projectName)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	// Create log directory
 	logDir, err := CreateLogDir(workDir)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	logPath := filepath.Join(logDir, "build.log")
 
@@ -637,10 +714,10 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	// Write layout JSON file
 	layoutJSON, err := json.MarshalIndent(layout, "", "  ")
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal layout JSON: %w", err)
+		return "", nil, fmt.Errorf("failed to marshal layout JSON: %w", err)
 	}
 	if err := os.WriteFile(layoutFile, layoutJSON, 0644); err != nil {
-		return "", fmt.Errorf("failed to write layout file: %w", err)
+		return "", nil, fmt.Errorf("failed to write layout file: %w", err)
 	}
 
 	// Run kbplacer to generate PCB and schematic
@@ -672,29 +749,45 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		LedCapacitorPositionX:   ledCapacitorPositionX,
 		LedCapacitorPositionY:   ledCapacitorPositionY,
 	}, logPath); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	// Bundle switch footprints
 	if err := BundleSwitchFootprints(projectFullPath, switchLibNickname); err != nil {
-		return "", err
+		return "", nil, err
 	}
 
-	// Generate schematic image
-	if err := GenerateSchematicImage(schFile, logPath); err != nil {
-		return "", err
+	// Generate schematic image(s). Multi-sheet projects (e.g. the LED chain)
+	// yield one SVG per sheet; each becomes its own previewable render.
+	schematicRenders, err := GenerateSchematicImage(schFile, logPath)
+	if err != nil {
+		return "", nil, err
 	}
 
 	// Generate renders
 	if err := GenerateRender(pcbFile, logPath); err != nil {
-		return "", err
+		return "", nil, err
+	}
+
+	// Assemble the artifact manifest: the PCB front/back renders followed by
+	// every schematic sheet. The frontend uses this list to decide which
+	// previews to show and which file to download.
+	renders := []common.RenderFile{
+		{Name: "front", Kind: "pcb-front"},
+		{Name: "back", Kind: "pcb-back"},
+	}
+	renders = append(renders, schematicRenders...)
+
+	files := &common.ProjectFiles{
+		Renders: renders,
+		Archive: fmt.Sprintf("%s.zip", taskID),
 	}
 
 	// Report duration time
 	duration := time.Since(startTime)
 	log.Printf("Task %s completed in %v", taskID, duration)
 
-	return workDir, nil
+	return workDir, files, nil
 }
 
 // Helper function to copy a file

@@ -60,7 +60,7 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	}
 
 	// Generate KiCad project (pass context for cancellation support)
-	workDir, err := kicad.NewPCB(ctx, taskID, taskRequest)
+	workDir, files, err := kicad.NewPCB(ctx, taskID, taskRequest)
 	if err != nil {
 		log.Printf("[Task %s] PCB generation failed (non-retriable): %v", taskID, err)
 		errMsg := fmt.Sprintf("PCB generation failed: %v", err)
@@ -77,7 +77,7 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	}
 
 	// Upload to Filer
-	if err := w.filerUploader.UploadToStorage(ctx, taskID, workDir); err != nil {
+	if err := w.filerUploader.UploadToStorage(ctx, taskID, workDir, files.Renders); err != nil {
 		log.Printf("[Task %s] Error uploading to storage: %v", taskID, err)
 		w.reportProgress(task, 50, fmt.Sprintf("Upload failed: %v", err))
 		return fmt.Errorf("Filer upload failed: %w", err)
@@ -85,9 +85,10 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 
 	log.Printf("[Task %s] Files uploaded to Filer successfully", taskID)
 
-	// Update progress: 100% - Complete
-	if err := w.reportProgress(task, 100, "Task completed successfully"); err != nil {
-		log.Printf("[Task %s] Failed to report final progress: %v", taskID, err)
+	// Update progress: 100% - Complete. The final result also carries the file
+	// manifest so the frontend learns which renders/artifacts were produced.
+	if err := w.reportResult(task, files); err != nil {
+		log.Printf("[Task %s] Failed to report final result: %v", taskID, err)
 	}
 
 	log.Printf("[Task %s] Task completed successfully", taskID)
@@ -107,6 +108,25 @@ func (w *Worker) reportProgress(task *asynq.Task, percentage int, message string
 	}
 
 	// Write progress to result (stored in Redis)
+	_, err = task.ResultWriter().Write(progressJSON)
+	return err
+}
+
+// reportResult writes the final successful result, including the manifest of
+// generated files, to the task's result writer. This is the last write of the
+// task, so the file list is what the server returns for a SUCCESS status.
+func (w *Worker) reportResult(task *asynq.Task, files *common.ProjectFiles) error {
+	progress := common.Progress{
+		Percentage: 100,
+		Message:    "Task completed successfully",
+		Files:      files,
+	}
+
+	progressJSON, err := json.Marshal(progress)
+	if err != nil {
+		return fmt.Errorf("failed to marshal result: %w", err)
+	}
+
 	_, err = task.ResultWriter().Write(progressJSON)
 	return err
 }
