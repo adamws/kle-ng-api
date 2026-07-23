@@ -44,6 +44,9 @@ RUN cd /kicad/.local/share/kicad/9.0/3rdparty \
   && mv footprints ../footprints/com_github_perigoso_keyswitch-kicad-library \
   && cd .. && rm -rf tmp
 
+# Backport needed footprint from KiCad 10 to KiCad 9
+COPY ./docker/LED_SK6812MINI-E_3.2x2.8mm_P1.5mm_ReverseMount.kicad_mod /usr/share/kicad/footprints/LED_SMD.pretty/
+
 # Install kbplacer Python package (still needed for subprocess calls)
 RUN pip3 install --upgrade pip \
   && pip3 install "git+https://github.com/adamws/kicad-kbplacer@42f472db17b71ee343579e0f5cf8cb45656325c8#egg=kbplacer[schematic]"
