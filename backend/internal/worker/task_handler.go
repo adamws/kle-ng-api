@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"runtime/debug"
@@ -33,15 +34,9 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	log.Printf("[Task %s] Starting KiCad project generation", taskID)
 
 	// Build-log stream publisher for this task. Streaming is best-effort: a
-	// failure to publish never affects the build outcome.
-	//
-	// KNOWN LIMITATION (to be addressed with the retry-logic rework): the stream
-	// is keyed by taskID alone, so an asynq retry (e.g. after a retriable Filer
-	// upload failure below) reuses the same stream. The previous attempt's
-	// terminal "end" entry then sits mid-stream, and a tailing client backfilling
-	// from the start stops there — reporting the earlier failure and missing the
-	// retry. Fix later by resetting the stream per attempt (or keying it by
-	// taskID+retry count).
+	// failure to publish never affects the build outcome. Because a task runs at
+	// most once (MaxRetry 0), each stream sees exactly one attempt and ends with
+	// a single terminal "end" marker.
 	pub := logstream.NewPublisher(w.redisClient, taskID)
 
 	// Publish the terminal "end" marker on every exit path (error, success, or
@@ -76,9 +71,9 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	// Parse task payload
 	var taskRequest map[string]interface{}
 	if err := json.Unmarshal(task.Payload(), &taskRequest); err != nil {
-		log.Printf("[Task %s] Failed to parse request JSON (non-retriable): %v", taskID, err)
+		log.Printf("[Task %s] Failed to parse request JSON: %v", taskID, err)
 		w.reportProgress(task, 0, "Invalid JSON payload")
-		return fmt.Errorf("failed to parse request JSON: %w", asynq.SkipRetry)
+		return fmt.Errorf("failed to parse request JSON: %w", err)
 	}
 
 	// Update progress: 10% - Generating PCB
@@ -90,11 +85,10 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	// Generate KiCad project (pass context for cancellation support)
 	workDir, files, err := kicad.NewPCB(ctx, taskID, taskRequest, pub)
 	if err != nil {
-		log.Printf("[Task %s] PCB generation failed (non-retriable): %v", taskID, err)
+		log.Printf("[Task %s] PCB generation failed: %v", taskID, err)
 		errMsg := fmt.Sprintf("PCB generation failed: %v", err)
 		w.reportProgress(task, 0, errMsg)
-		// All PCB generation errors are non-retriable
-		return fmt.Errorf("%s: %w", errMsg, asynq.SkipRetry)
+		return errors.New(errMsg)
 	}
 
 	log.Printf("[Task %s] PCB generated successfully, work directory: %s", taskID, workDir)

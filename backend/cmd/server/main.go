@@ -222,8 +222,8 @@ func (a *App) handleAbandonedTask(taskID string) {
 
 	// Handle based on task state
 	switch taskInfo.State {
-	case asynq.TaskStatePending, asynq.TaskStateRetry:
-		// Cancel pending/retry tasks
+	case asynq.TaskStatePending:
+		// Cancel abandoned pending tasks (tasks no longer enter a retry state).
 		log.Printf("[Abandonment] Cancelling abandoned pending task: %s", taskID)
 		err := a.asynqInspector.DeleteTask("kicad", taskID)
 		if err != nil {
@@ -446,7 +446,10 @@ func (a *App) KicadPostNewTask(w http.ResponseWriter, r *http.Request) {
 		task := asynq.NewTask(
 			"generate_kicad_project",
 			body,
-			asynq.MaxRetry(3),
+			// No task-level auto-retry: a task is a single attempt so its log
+			// stream stays clean (one terminal marker). Transient failures are
+			// retried inside the task at the chunk level (the Filer upload).
+			asynq.MaxRetry(0),
 			asynq.Timeout(10*time.Minute),
 			asynq.Queue("kicad"),
 			asynq.Retention(24*time.Hour), // Keep task info for 24h
@@ -543,15 +546,9 @@ func (a *App) KicadGetTaskStatus(w http.ResponseWriter, r *http.Request) {
 			response.Result = successResult(taskInfo.Result)
 		}
 
-	case asynq.TaskStateRetry:
-		response.TaskStatus = "RETRY"
-		response.Result = map[string]interface{}{
-			"percentage": 0,
-			"retries":    taskInfo.Retried,
-			"max_retry":  taskInfo.MaxRetry,
-		}
-
 	default:
+		// Tasks no longer auto-retry (MaxRetry 0), so TaskStateRetry is not
+		// expected; treat any unexpected state as UNKNOWN.
 		response.TaskStatus = "UNKNOWN"
 		response.Result = map[string]interface{}{}
 	}

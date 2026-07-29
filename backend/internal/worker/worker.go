@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"backend/internal/storage"
 
@@ -46,11 +45,9 @@ func NewWorker() *Worker {
 				config.QueueName: 10, // priority weight
 				"critical":       20, // higher priority for critical tasks
 			},
-			// Retry configuration with exponential backoff
-			RetryDelayFunc: func(n int, err error, task *asynq.Task) time.Duration {
-				// Exponential backoff: 1min, 2min, 4min, 8min
-				return time.Duration(1<<uint(n)) * time.Minute
-			},
+			// No RetryDelayFunc: tasks are enqueued with MaxRetry(0), so they
+			// never retry at the asynq level. Transient failures are retried
+			// inside the task around the specific fallible chunk (Filer upload).
 			// Error handler
 			ErrorHandler: asynq.ErrorHandlerFunc(func(ctx context.Context, task *asynq.Task, err error) {
 				log.Printf("[ERROR] Task %s failed: %v", task.Type(), err)

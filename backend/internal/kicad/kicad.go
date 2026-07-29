@@ -266,7 +266,7 @@ func BundleSwitchFootprints(projectPath string, libNickname string) error {
 }
 
 // RunKiCadSVG exports PCB to SVG format
-func RunKiCadSVG(pcbFile string, layers string, outputFile string) error {
+func RunKiCadSVG(ctx context.Context, pcbFile string, layers string, outputFile string) error {
 	args := []string{
 		"pcb", "export", "svg",
 		"--layers", layers,
@@ -277,7 +277,10 @@ func RunKiCadSVG(pcbFile string, layers string, outputFile string) error {
 		pcbFile,
 	}
 
-	cmd := exec.Command("kicad-cli", args...)
+	// CommandContext so the task's timeout/cancellation actually kills a hung
+	// kicad-cli (the task no longer retries, so a hang would otherwise stall it
+	// until the abandonment window).
+	cmd := exec.CommandContext(ctx, "kicad-cli", args...)
 
 	// Capture output for error reporting
 	output, err := cmd.CombinedOutput()
@@ -293,18 +296,18 @@ func RunKiCadSVG(pcbFile string, layers string, outputFile string) error {
 }
 
 // GenerateRender generates front and back SVG renders of the PCB
-func GenerateRender(pcbPath string, logPath string) error {
+func GenerateRender(ctx context.Context, pcbPath string, logPath string) error {
 	logDir := filepath.Dir(logPath)
 
 	// Generate front render
 	frontSVG := filepath.Join(logDir, "front.svg")
-	if err := RunKiCadSVG(pcbPath, SVGTemplateFront, frontSVG); err != nil {
+	if err := RunKiCadSVG(ctx, pcbPath, SVGTemplateFront, frontSVG); err != nil {
 		return fmt.Errorf("failed to generate front render: %w", err)
 	}
 
 	// Generate back render
 	backSVG := filepath.Join(logDir, "back.svg")
-	if err := RunKiCadSVG(pcbPath, SVGTemplateBack, backSVG); err != nil {
+	if err := RunKiCadSVG(ctx, pcbPath, SVGTemplateBack, backSVG); err != nil {
 		return fmt.Errorf("failed to generate back render: %w", err)
 	}
 
@@ -342,7 +345,7 @@ func slugifySheet(name string) string {
 // historical render name "schematic"; child sheets ("<project>-<sheet>") become
 // "schematic-<sheet>". The returned RenderFile list is ordered with the root
 // sheet first.
-func GenerateSchematicImage(schematicPath string, logPath string) ([]common.RenderFile, error) {
+func GenerateSchematicImage(ctx context.Context, schematicPath string, logPath string) ([]common.RenderFile, error) {
 	schematicDir := filepath.Dir(schematicPath)
 	logDir := filepath.Dir(logPath)
 
@@ -353,7 +356,8 @@ func GenerateSchematicImage(schematicPath string, logPath string) ([]common.Rend
 		schematicPath,
 	}
 
-	cmd := exec.Command("kicad-cli", args...)
+	// CommandContext so the task's timeout/cancellation kills a hung kicad-cli.
+	cmd := exec.CommandContext(ctx, "kicad-cli", args...)
 
 	// Capture output for error reporting
 	output, cmdErr := cmd.CombinedOutput()
@@ -790,14 +794,14 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	// kicad-cli steps use buffered CombinedOutput, so publish worker markers
 	// around them to keep the terminal from going silent post-placement.
 	publishMarker(ctx, pub, "Generating schematic image")
-	schematicRenders, err := GenerateSchematicImage(schFile, logPath)
+	schematicRenders, err := GenerateSchematicImage(ctx, schFile, logPath)
 	if err != nil {
 		return "", nil, err
 	}
 
 	// Generate renders
 	publishMarker(ctx, pub, "Generating PCB renders")
-	if err := GenerateRender(pcbFile, logPath); err != nil {
+	if err := GenerateRender(ctx, pcbFile, logPath); err != nil {
 		return "", nil, err
 	}
 
