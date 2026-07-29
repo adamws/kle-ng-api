@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
+	"time"
 
 	"backend/internal/common"
 	"backend/internal/kicad"
+	"backend/internal/logstream"
 
 	"github.com/hibiken/asynq"
 )
@@ -29,6 +31,31 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	taskID := task.ResultWriter().TaskID()
 
 	log.Printf("[Task %s] Starting KiCad project generation", taskID)
+
+	// Build-log stream publisher for this task. Streaming is best-effort: a
+	// failure to publish never affects the build outcome.
+	//
+	// KNOWN LIMITATION (to be addressed with the retry-logic rework): the stream
+	// is keyed by taskID alone, so an asynq retry (e.g. after a retriable Filer
+	// upload failure below) reuses the same stream. The previous attempt's
+	// terminal "end" entry then sits mid-stream, and a tailing client backfilling
+	// from the start stops there — reporting the earlier failure and missing the
+	// retry. Fix later by resetting the stream per attempt (or keying it by
+	// taskID+retry count).
+	pub := logstream.NewPublisher(w.redisClient, taskID)
+
+	// Publish the terminal "end" marker on every exit path (error, success, or
+	// recovered panic). buildStatus defaults to "failure" and is flipped to
+	// "success" only on the happy path, so any early return reports a failure.
+	// Registered before the panic-recovery defer below so it runs last, after
+	// recovery has completed. A fresh context is used because the task context
+	// may already be cancelled (e.g. on timeout) by the time we get here.
+	buildStatus := "failure"
+	defer func() {
+		endCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = pub.PublishEnd(endCtx, buildStatus)
+	}()
 
 	// Update progress: Starting
 	if err := w.reportProgress(task, 0, "Initializing task"); err != nil {
@@ -58,9 +85,10 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	if err := w.reportProgress(task, 10, "Generating KiCad PCB files"); err != nil {
 		log.Printf("[Task %s] Failed to report progress: %v", taskID, err)
 	}
+	_ = pub.PublishLine(ctx, logstream.SourceWorker, "Generating KiCad PCB files")
 
 	// Generate KiCad project (pass context for cancellation support)
-	workDir, files, err := kicad.NewPCB(ctx, taskID, taskRequest)
+	workDir, files, err := kicad.NewPCB(ctx, taskID, taskRequest, pub)
 	if err != nil {
 		log.Printf("[Task %s] PCB generation failed (non-retriable): %v", taskID, err)
 		errMsg := fmt.Sprintf("PCB generation failed: %v", err)
@@ -75,6 +103,7 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	if err := w.reportProgress(task, 50, "Uploading files to storage"); err != nil {
 		log.Printf("[Task %s] Failed to report progress: %v", taskID, err)
 	}
+	_ = pub.PublishLine(ctx, logstream.SourceWorker, "Uploading files to storage")
 
 	// Upload to Filer
 	if err := w.filerUploader.UploadToStorage(ctx, taskID, workDir, files.Renders); err != nil {
@@ -91,7 +120,10 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 		log.Printf("[Task %s] Failed to report final result: %v", taskID, err)
 	}
 
+	_ = pub.PublishLine(ctx, logstream.SourceWorker, "Task completed successfully")
+
 	log.Printf("[Task %s] Task completed successfully", taskID)
+	buildStatus = "success"
 	return nil
 }
 

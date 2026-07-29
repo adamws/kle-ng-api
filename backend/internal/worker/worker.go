@@ -11,6 +11,7 @@ import (
 	"backend/internal/storage"
 
 	"github.com/hibiken/asynq"
+	"github.com/redis/go-redis/v9"
 )
 
 // Worker represents the asynq worker with all its dependencies
@@ -18,6 +19,7 @@ type Worker struct {
 	asynqServer   *asynq.Server
 	mux           *asynq.ServeMux
 	filerUploader *storage.FilerUploader
+	redisClient   *redis.Client
 	config        Config
 }
 
@@ -67,12 +69,23 @@ func NewWorker() *Worker {
 	filerUploader := storage.NewFilerUploader(config.FilerURL)
 
 	log.Println("Filer uploader created")
+
+	// Redis client for publishing build-log streams (separate from the asynq
+	// connection pool; used only for the pcb:logs:{taskID} streams).
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     config.RedisAddr,
+		Password: config.RedisPassword,
+		DB:       config.RedisDB,
+	})
+
+	log.Println("Redis log-stream client created")
 	log.Println("Worker initialized successfully")
 
 	return &Worker{
 		asynqServer:   asynqServer,
 		mux:           mux,
 		filerUploader: filerUploader,
+		redisClient:   redisClient,
 		config:        config,
 	}
 }
@@ -97,5 +110,8 @@ func (w *Worker) Start() {
 
 	log.Println("Shutting down worker...")
 	w.asynqServer.Shutdown()
+	if err := w.redisClient.Close(); err != nil {
+		log.Printf("Error closing Redis log-stream client: %v", err)
+	}
 	log.Println("Worker stopped")
 }

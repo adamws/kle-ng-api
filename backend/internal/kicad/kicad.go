@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -13,7 +14,17 @@ import (
 	"time"
 
 	"backend/internal/common"
+	"backend/internal/logstream"
 )
+
+// publishMarker emits a worker step marker to the log stream if a publisher is
+// present. It is nil-safe so kbplacer generation still works without streaming
+// (e.g. in tests or if the Redis client failed to initialize).
+func publishMarker(ctx context.Context, pub *logstream.Publisher, line string) {
+	if pub != nil {
+		_ = pub.PublishLine(ctx, logstream.SourceWorker, line)
+	}
+}
 
 // Constants for SVG export templates and library paths
 const (
@@ -60,6 +71,9 @@ type KBPlacerOptions struct {
 
 func buildKBPlacerArgs(opts KBPlacerOptions) []string {
 	args := []string{
+		// -u forces unbuffered stdout so lines flush promptly to the log stream
+		// (kbplacer's logging goes to stderr, which is already line-buffered).
+		"-u",
 		"-m", "kbplacer",
 		"--pcb-file", opts.PCBPath,
 		"--create-sch-file",
@@ -143,8 +157,11 @@ func buildKBPlacerArgs(opts KBPlacerOptions) []string {
 	return args
 }
 
-// RunKBPlacer runs the kbplacer tool to generate KiCad PCB and schematic files
-func RunKBPlacer(ctx context.Context, opts KBPlacerOptions, logPath string) error {
+// RunKBPlacer runs the kbplacer tool to generate KiCad PCB and schematic files.
+// When pub is non-nil, output is teed line-by-line to the log stream in addition
+// to the on-disk build.log (which is still needed for the zip bundle and the
+// on-failure error message). pub may be nil to disable streaming.
+func RunKBPlacer(ctx context.Context, opts KBPlacerOptions, logPath string, pub *logstream.Publisher) error {
 	args := buildKBPlacerArgs(opts)
 
 	// Create command with context (allows cancellation if task times out)
@@ -158,9 +175,20 @@ func RunKBPlacer(ctx context.Context, opts KBPlacerOptions, logPath string) erro
 	}
 	defer logFile.Close()
 
-	// Redirect stdout and stderr to log file
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	// Redirect stdout and stderr to the log file, and — when streaming is
+	// enabled — also to a line-splitting writer that publishes each line to the
+	// log stream. A single MultiWriter value is shared by Stdout and Stderr so
+	// os/exec serializes writes through one goroutine (it special-cases
+	// Stdout==Stderr), avoiding concurrent access to the line buffer and file.
+	var out io.Writer = logFile
+	if pub != nil {
+		streamW := pub.Writer(ctx, logstream.SourceKbplacer)
+		// Flush any final line that lacked a trailing newline.
+		defer streamW.Close()
+		out = io.MultiWriter(logFile, streamW)
+	}
+	cmd.Stdout = out
+	cmd.Stderr = out
 
 	// Start the process
 	if err := cmd.Start(); err != nil {
@@ -507,7 +535,7 @@ func parsePlacement(settings map[string]interface{}, prefix string) (int, string
 // the work directory and a manifest of the generated artifacts (PCB renders and
 // one SVG per schematic sheet) so the caller can upload them and report the list
 // of available files to the frontend.
-func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface{}) (string, *common.ProjectFiles, error) {
+func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface{}, pub *logstream.Publisher) (string, *common.ProjectFiles, error) {
 	startTime := time.Now()
 
 	// Extract layout and settings from request
@@ -748,7 +776,7 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		LedCapacitorSide:        ledCapacitorSide,
 		LedCapacitorPositionX:   ledCapacitorPositionX,
 		LedCapacitorPositionY:   ledCapacitorPositionY,
-	}, logPath); err != nil {
+	}, logPath, pub); err != nil {
 		return "", nil, err
 	}
 
@@ -758,13 +786,17 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	}
 
 	// Generate schematic image(s). Multi-sheet projects (e.g. the LED chain)
-	// yield one SVG per sheet; each becomes its own previewable render.
+	// yield one SVG per sheet; each becomes its own previewable render. These
+	// kicad-cli steps use buffered CombinedOutput, so publish worker markers
+	// around them to keep the terminal from going silent post-placement.
+	publishMarker(ctx, pub, "Generating schematic image")
 	schematicRenders, err := GenerateSchematicImage(schFile, logPath)
 	if err != nil {
 		return "", nil, err
 	}
 
 	// Generate renders
+	publishMarker(ctx, pub, "Generating PCB renders")
 	if err := GenerateRender(pcbFile, logPath); err != nil {
 		return "", nil, err
 	}

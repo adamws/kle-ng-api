@@ -17,6 +17,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/hibiken/asynq"
+	"github.com/redis/go-redis/v9"
 )
 
 // Version information - set at build time using ldflags
@@ -81,6 +82,7 @@ type App struct {
 	corsAllowedOrigin   string
 	asynqClient         *asynq.Client
 	asynqInspector      *asynq.Inspector
+	redisClient         *redis.Client
 	httpClient          *http.Client
 	filerURL            string
 	taskAccessTracker   *TaskAccessTracker
@@ -107,6 +109,14 @@ func NewApp() App {
 
 	// Create asynq inspector for task status queries
 	asynqInspector := asynq.NewInspector(redisOpt)
+
+	// Redis client for reading build-log streams (pcb:logs:{taskID}); the WS log
+	// endpoint tails these. Separate from the asynq pools above.
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     redisAddr,
+		Password: redisPassword,
+		DB:       redisDB,
+	})
 
 	// Initialize HTTP client for Filer API
 	httpClient := &http.Client{
@@ -143,6 +153,7 @@ func NewApp() App {
 		corsAllowedOrigin:   corsAllowedOrigin,
 		asynqClient:         asynqClient,
 		asynqInspector:      asynqInspector,
+		redisClient:         redisClient,
 		httpClient:          httpClient,
 		filerURL:            filerURL,
 		taskAccessTracker:   taskAccessTracker,
@@ -303,6 +314,11 @@ func (a *App) Serve() error {
 	// KiCad subdomain routes
 	kicadRouter.HandleFunc("/api/pcb", kicadPostNewTask).Methods("POST")
 	kicadRouter.HandleFunc("/api/pcb/{task_id}", kicadGetTaskStatus).Methods("GET")
+	// Live build-log stream (WebSocket). Not wrapped in the CORS helpers: the WS
+	// handshake is a GET with no XHR preflight; origin is enforced by the
+	// upgrader's CheckOrigin. A hijacked WS connection also bypasses the server's
+	// WriteTimeout, so no server-wide timeout change is needed.
+	kicadRouter.HandleFunc("/api/pcb/{task_id}/logs", a.KicadGetTaskLogs).Methods("GET")
 	kicadRouter.HandleFunc("/api/pcb/{task_id}", kicadDeleteTask).Methods("DELETE")
 	kicadRouter.HandleFunc("/api/pcb/{task_id}/render/{name}", kicadGetTaskRender).Methods("GET")
 	kicadRouter.HandleFunc("/api/pcb/{task_id}/result", kicadGetTaskResult).Methods("GET")
@@ -341,6 +357,10 @@ func (a *App) Serve() error {
 
 		if err := srv.Shutdown(ctx); err != nil {
 			log.Printf("Server shutdown error: %v", err)
+		}
+
+		if err := a.redisClient.Close(); err != nil {
+			log.Printf("Error closing Redis log-stream client: %v", err)
 		}
 	}()
 
