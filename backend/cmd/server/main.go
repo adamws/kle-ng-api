@@ -508,7 +508,7 @@ func (a *App) KicadGetTaskStatus(w http.ResponseWriter, r *http.Request) {
 	switch taskInfo.State {
 	case asynq.TaskStatePending:
 		response.TaskStatus = "PENDING"
-		response.Result = map[string]interface{}{"percentage": 0}
+		response.Result = map[string]interface{}{}
 
 	case asynq.TaskStateActive:
 		response.TaskStatus = "PROGRESS"
@@ -517,14 +517,13 @@ func (a *App) KicadGetTaskStatus(w http.ResponseWriter, r *http.Request) {
 			var progress common.Progress
 			if err := json.Unmarshal(taskInfo.Result, &progress); err == nil {
 				response.Result = map[string]interface{}{
-					"percentage": progress.Percentage,
-					"message":    progress.Message,
+					"message": progress.Message,
 				}
 			} else {
-				response.Result = map[string]interface{}{"percentage": 50}
+				response.Result = map[string]interface{}{}
 			}
 		} else {
-			response.Result = map[string]interface{}{"percentage": 50}
+			response.Result = map[string]interface{}{}
 		}
 
 	case asynq.TaskStateCompleted:
@@ -537,8 +536,7 @@ func (a *App) KicadGetTaskStatus(w http.ResponseWriter, r *http.Request) {
 		if taskInfo.LastErr != "" {
 			response.TaskStatus = "FAILURE"
 			response.Result = map[string]interface{}{
-				"percentage": 0,
-				"error":      taskInfo.LastErr,
+				"error": taskInfo.LastErr,
 			}
 		} else {
 			// Archived successfully completed task
@@ -737,11 +735,11 @@ func (a *App) FilerProxy(objectName string, contentDisposition string) http.Hand
 }
 
 // successResult builds the task_result payload for a completed task from the
-// worker's final result write. It always reports a percentage and, when the
-// worker recorded a file manifest, the "files" list so the frontend can preview
-// the generated renders and download the archive.
+// worker's final result write. When the worker recorded a file manifest, it
+// includes the "files" list so the frontend can preview the generated renders
+// and download the archive.
 func successResult(raw []byte) map[string]interface{} {
-	result := map[string]interface{}{"percentage": 100}
+	result := map[string]interface{}{}
 	if len(raw) == 0 {
 		return result
 	}
@@ -751,7 +749,6 @@ func successResult(raw []byte) map[string]interface{} {
 		return result
 	}
 
-	result["percentage"] = progress.Percentage
 	if progress.Files != nil {
 		result["files"] = progress.Files
 	}

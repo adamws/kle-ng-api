@@ -53,7 +53,7 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	}()
 
 	// Update progress: Starting
-	if err := w.reportProgress(task, 0, "Initializing task"); err != nil {
+	if err := w.reportProgress(task, "Initializing task"); err != nil {
 		log.Printf("[Task %s] Failed to report progress: %v", taskID, err)
 	}
 
@@ -64,7 +64,7 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 			log.Printf("[Task %s] Stack trace: %s", taskID, debug.Stack())
 
 			// Report error progress
-			w.reportProgress(task, 0, fmt.Sprintf("Panic: %v", r))
+			w.reportProgress(task, fmt.Sprintf("Panic: %v", r))
 		}
 	}()
 
@@ -72,12 +72,12 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	var taskRequest map[string]interface{}
 	if err := json.Unmarshal(task.Payload(), &taskRequest); err != nil {
 		log.Printf("[Task %s] Failed to parse request JSON: %v", taskID, err)
-		w.reportProgress(task, 0, "Invalid JSON payload")
+		w.reportProgress(task, "Invalid JSON payload")
 		return fmt.Errorf("failed to parse request JSON: %w", err)
 	}
 
-	// Update progress: 10% - Generating PCB
-	if err := w.reportProgress(task, 10, "Generating KiCad PCB files"); err != nil {
+	// Update progress: Generating PCB
+	if err := w.reportProgress(task, "Generating KiCad PCB files"); err != nil {
 		log.Printf("[Task %s] Failed to report progress: %v", taskID, err)
 	}
 	_ = pub.PublishLine(ctx, logstream.SourceWorker, "Generating KiCad PCB files")
@@ -87,14 +87,14 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	if err != nil {
 		log.Printf("[Task %s] PCB generation failed: %v", taskID, err)
 		errMsg := fmt.Sprintf("PCB generation failed: %v", err)
-		w.reportProgress(task, 0, errMsg)
+		w.reportProgress(task, errMsg)
 		return errors.New(errMsg)
 	}
 
 	log.Printf("[Task %s] PCB generated successfully, work directory: %s", taskID, workDir)
 
-	// Update progress: 50% - Uploading to S3
-	if err := w.reportProgress(task, 50, "Uploading files to storage"); err != nil {
+	// Update progress: Uploading to S3
+	if err := w.reportProgress(task, "Uploading files to storage"); err != nil {
 		log.Printf("[Task %s] Failed to report progress: %v", taskID, err)
 	}
 	_ = pub.PublishLine(ctx, logstream.SourceWorker, "Uploading files to storage")
@@ -102,14 +102,14 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	// Upload to Filer
 	if err := w.filerUploader.UploadToStorage(ctx, taskID, workDir, files.Renders); err != nil {
 		log.Printf("[Task %s] Error uploading to storage: %v", taskID, err)
-		w.reportProgress(task, 50, fmt.Sprintf("Upload failed: %v", err))
+		w.reportProgress(task, fmt.Sprintf("Upload failed: %v", err))
 		return fmt.Errorf("Filer upload failed: %w", err)
 	}
 
 	log.Printf("[Task %s] Files uploaded to Filer successfully", taskID)
 
-	// Update progress: 100% - Complete. The final result also carries the file
-	// manifest so the frontend learns which renders/artifacts were produced.
+	// Complete. The final result also carries the file manifest so the frontend
+	// learns which renders/artifacts were produced.
 	if err := w.reportResult(task, files); err != nil {
 		log.Printf("[Task %s] Failed to report final result: %v", taskID, err)
 	}
@@ -121,11 +121,10 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	return nil
 }
 
-// reportProgress writes progress updates to the task's result writer
-func (w *Worker) reportProgress(task *asynq.Task, percentage int, message string) error {
+// reportProgress writes a progress message to the task's result writer
+func (w *Worker) reportProgress(task *asynq.Task, message string) error {
 	progress := common.Progress{
-		Percentage: percentage,
-		Message:    message,
+		Message: message,
 	}
 
 	progressJSON, err := json.Marshal(progress)
@@ -143,9 +142,8 @@ func (w *Worker) reportProgress(task *asynq.Task, percentage int, message string
 // task, so the file list is what the server returns for a SUCCESS status.
 func (w *Worker) reportResult(task *asynq.Task, files *common.ProjectFiles) error {
 	progress := common.Progress{
-		Percentage: 100,
-		Message:    "Task completed successfully",
-		Files:      files,
+		Message: "Task completed successfully",
+		Files:   files,
 	}
 
 	progressJSON, err := json.Marshal(progress)

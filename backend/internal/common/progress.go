@@ -3,8 +3,7 @@ package common
 // Progress represents task progress information sent from worker to server via asynq/Redis.
 // This struct must maintain binary compatibility for JSON serialization.
 type Progress struct {
-	Percentage int    `json:"percentage"`
-	Message    string `json:"message,omitempty"`
+	Message string `json:"message,omitempty"`
 	// Files is the manifest of generated artifacts. It is only populated on the
 	// final (successful) result write, so intermediate progress updates stay
 	// compact. See ProjectFiles.
