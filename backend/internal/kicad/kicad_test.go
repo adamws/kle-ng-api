@@ -202,3 +202,45 @@ func TestBuildSwitchPresetFileDiodeMapping(t *testing.T) {
 		}
 	}
 }
+
+// The stabilizer library must be bundled and listed in fp-lib-table next to
+// the switch library, a repeated library only once.
+func TestBundleFootprintLibraries(t *testing.T) {
+	srcRoot := t.TempDir()
+	projectPath := t.TempDir()
+	for _, lib := range []string{"Switch_Keyboard_Cherry_MX", "Mounting_Keyboard_Stabilizer"} {
+		dir := filepath.Join(srcRoot, lib+".pretty")
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, lib+"_fp.kicad_mod"), []byte("(footprint)"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	libs := []string{"Switch_Keyboard_Cherry_MX", "Mounting_Keyboard_Stabilizer", "Switch_Keyboard_Cherry_MX"}
+	if err := bundleFootprintLibraries(srcRoot, projectPath, libs); err != nil {
+		t.Fatalf("bundleFootprintLibraries: %v", err)
+	}
+
+	for _, lib := range libs[:2] {
+		fp := filepath.Join(projectPath, "footprints", lib+".pretty", lib+"_fp.kicad_mod")
+		if _, err := os.Stat(fp); err != nil {
+			t.Errorf("%s not bundled: %v", fp, err)
+		}
+	}
+
+	table, err := os.ReadFile(filepath.Join(projectPath, "fp-lib-table"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `(fp_lib_table
+   (version 7)
+   (lib (name "Switch_Keyboard_Cherry_MX")(type "KiCad")(uri "${KIPRJMOD}/footprints/Switch_Keyboard_Cherry_MX.pretty")(options "")(descr ""))
+   (lib (name "Mounting_Keyboard_Stabilizer")(type "KiCad")(uri "${KIPRJMOD}/footprints/Mounting_Keyboard_Stabilizer.pretty")(options "")(descr ""))
+)
+`
+	if string(table) != want {
+		t.Errorf("fp-lib-table =\n%s\nwant\n%s", table, want)
+	}
+}

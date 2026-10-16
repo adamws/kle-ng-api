@@ -262,6 +262,37 @@ def test_layout_with_various_key_sizes(request, tmpdir, pcb_endpoint):
     layout_test_steps(tmpdir, pcb_endpoint, layout_file, settings)
 
 
+def test_stabilizer_footprints_bundled(request, tmpdir, pcb_endpoint):
+    """Stabilizer footprint library is bundled with the project like the switches."""
+    filename = request.module.__file__
+    test_dir, _ = os.path.splitext(filename)
+    layout_file = f"{test_dir}/sizes_internal.json"
+
+    settings = dict(DEFAULT_SETTINGS)
+    settings["stabilizerFootprint"] = "Mounting_Keyboard_Stabilizer:Stabilizer_Cherry_MX_{:.2f}u"
+    layout_test_steps(tmpdir, pcb_endpoint, layout_file, settings)
+
+    with zipfile.ZipFile(tmpdir / "result.zip", "r") as result:
+        files_in_zip = result.namelist()
+        fp_lib_table = result.read("keyboard/fp-lib-table").decode()
+
+    for name in ["Switch_Keyboard_Cherry_MX", "Mounting_Keyboard_Stabilizer"]:
+        entry = (
+            f'(lib (name "{name}")(type "KiCad")'
+            f'(uri "${{KIPRJMOD}}/footprints/{name}.pretty")(options "")(descr ""))'
+        )
+        assert entry in fp_lib_table, fp_lib_table
+
+    # stabilizer sizes used by the layout
+    for size in ["2.00", "3.00", "6.00", "6.25", "7.00", "8.00"]:
+        path = (
+            "keyboard/footprints/Mounting_Keyboard_Stabilizer.pretty/"
+            f"Stabilizer_Cherry_MX_{size}u.kicad_mod"
+        )
+        assert path in files_in_zip, f"{path} not bundled"
+    assert "keyboard/footprints/Switch_Keyboard_Cherry_MX.pretty/SW_Cherry_MX_PCB_1.00u.kicad_mod" in files_in_zip
+
+
 def test_layout_with_non_default_key_distance(request, tmpdir, pcb_endpoint):
     filename = request.module.__file__
     test_dir, _ = os.path.splitext(filename)

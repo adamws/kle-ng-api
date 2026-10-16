@@ -241,33 +241,44 @@ func GetKicad3rdPartyPath() (string, error) {
 	return src, nil
 }
 
-// BundleSwitchFootprints copies switch footprint library into the project
-func BundleSwitchFootprints(projectPath string, libNickname string) error {
+// BundleFootprintLibraries copies the switch library footprint libraries
+// (switches, stabilizers) into the project and lists them in its fp-lib-table
+func BundleFootprintLibraries(projectPath string, libNicknames []string) error {
 	kicad3rdParty, err := GetKicad3rdPartyPath()
 	if err != nil {
 		return fmt.Errorf("failed to get KiCad 3rd party path: %w", err)
 	}
+	return bundleFootprintLibraries(filepath.Join(kicad3rdParty, SwitchesLibraryPath), projectPath, libNicknames)
+}
 
-	src := filepath.Join(kicad3rdParty, SwitchesLibraryPath, libNickname+".pretty")
-	dst := filepath.Join(projectPath, "footprints", libNickname+".pretty")
+func bundleFootprintLibraries(srcRoot string, projectPath string, libNicknames []string) error {
+	var libs strings.Builder
+	bundled := map[string]bool{}
+	for _, libNickname := range libNicknames {
+		if bundled[libNickname] {
+			continue
+		}
+		bundled[libNickname] = true
 
-	// Create destination directory
-	if err := os.MkdirAll(dst, 0755); err != nil {
-		return fmt.Errorf("failed to create footprints directory: %w", err)
-	}
+		src := filepath.Join(srcRoot, libNickname+".pretty")
+		dst := filepath.Join(projectPath, "footprints", libNickname+".pretty")
 
-	// Copy directory contents
-	if err := copyDir(src, dst); err != nil {
-		return fmt.Errorf("failed to copy footprint library: %w", err)
+		// Create destination directory
+		if err := os.MkdirAll(dst, 0755); err != nil {
+			return fmt.Errorf("failed to create footprints directory: %w", err)
+		}
+
+		// Copy directory contents
+		if err := copyDir(src, dst); err != nil {
+			return fmt.Errorf("failed to copy footprint library: %w", err)
+		}
+
+		fmt.Fprintf(&libs, "   (lib (name \"%s\")(type \"KiCad\")(uri \"${KIPRJMOD}/footprints/%s.pretty\")(options \"\")(descr \"\"))\n", libNickname, libNickname)
 	}
 
 	// Write fp-lib-table file
 	fpLibTablePath := filepath.Join(projectPath, "fp-lib-table")
-	fpLibTableContent := fmt.Sprintf(`(fp_lib_table
-   (version 7)
-   (lib (name "%s")(type "KiCad")(uri "${KIPRJMOD}/footprints/%s.pretty")(options "")(descr ""))
-)
-`, libNickname, libNickname)
+	fpLibTableContent := "(fp_lib_table\n   (version 7)\n" + libs.String() + ")\n"
 
 	if err := os.WriteFile(fpLibTablePath, []byte(fpLibTableContent), 0644); err != nil {
 		return fmt.Errorf("failed to write fp-lib-table: %w", err)
@@ -670,12 +681,14 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 
 	// Resolve stabilizer footprint path (same library as switches) when provided
 	stabilizerFootprint := ""
+	bundledLibNicknames := []string{switchLibNickname}
 	if stabilizerFootprintSetting != "" {
 		stabParts := strings.SplitN(stabilizerFootprintSetting, ":", 2)
 		if len(stabParts) != 2 {
 			return "", nil, fmt.Errorf("%w: stabilizerFootprint must be in format 'lib:footprint'", ErrInvalidFootprintFormat)
 		}
 		stabilizerFootprint = kicad3rdParty + SwitchesLibraryPath + stabParts[0] + ".pretty:" + stabParts[1]
+		bundledLibNicknames = append(bundledLibNicknames, stabParts[0])
 	}
 
 	// Resolve LED chain footprints (LED and decoupling capacitor live in the
@@ -825,8 +838,8 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		return "", nil, err
 	}
 
-	// Bundle switch footprints
-	if err := BundleSwitchFootprints(projectFullPath, switchLibNickname); err != nil {
+	// Bundle switch and stabilizer footprints
+	if err := BundleFootprintLibraries(projectFullPath, bundledLibNicknames); err != nil {
 		return "", nil, err
 	}
 
