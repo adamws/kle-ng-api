@@ -50,6 +50,11 @@ type KBPlacerOptions struct {
 	DiodePositionX          float64
 	DiodePositionY          float64
 
+	// DiodePresetPath, when set, places diodes and routes switch-diode pairs
+	// from a switch preset file (--diode "D{} PRESET <path>") instead of the
+	// CUSTOM diode position above.
+	DiodePresetPath string
+
 	// LED chain options. LedFootprint/LedCapacitorFootprint are shared between
 	// the PCB (CreateLedPcbElements) and schematic (CreateLedSchFile) paths.
 	CreateLedPcbElements  bool
@@ -102,8 +107,14 @@ func buildKBPlacerArgs(opts KBPlacerOptions) []string {
 	args = append(args, "--switch", switchArg)
 
 	// Add diode configuration argument
-	// Format: --diode "D{} CUSTOM <x> <y> <rotation> <side>"
-	diodeArg := fmt.Sprintf("D{} CUSTOM %f %f %d %s", opts.DiodePositionX, opts.DiodePositionY, opts.DiodeRotation, opts.DiodeSide)
+	// Format: --diode "D{} PRESET <path>" (the preset file holds the diode
+	// position too) or --diode "D{} CUSTOM <x> <y> <rotation> <side>"
+	var diodeArg string
+	if opts.DiodePresetPath != "" {
+		diodeArg = fmt.Sprintf("D{} PRESET %s", opts.DiodePresetPath)
+	} else {
+		diodeArg = fmt.Sprintf("D{} CUSTOM %f %f %d %s", opts.DiodePositionX, opts.DiodePositionY, opts.DiodeRotation, opts.DiodeSide)
+	}
 	args = append(args, "--diode", diodeArg)
 
 	// --additional-elements is a ';' separated list controlling placement of
@@ -629,6 +640,13 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		return "", nil, ErrMissingDiodePositionY
 	}
 
+	// Optional switch-diode track preset, replicated by kbplacer to every key
+	// and validated by it.
+	trackPreset, err := parseTrackPreset(settings)
+	if err != nil {
+		return "", nil, err
+	}
+
 	// Split footprint settings into library nickname and footprint name
 	// Format: "lib_nickname:footprint"
 	switchParts := strings.SplitN(switchFootprintSetting, ":", 2)
@@ -711,6 +729,14 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	routeSwitchesWithDiodes := routing == "Switch-Diode only" || routing == "Full"
 	routeRowsAndColumns := routing == "Full"
 
+	// The preset only describes switch-diode tracks, without that routing
+	// there is nothing to use it for.
+	useTrackPreset := trackPreset != nil && routeSwitchesWithDiodes
+	if trackPreset != nil && !useTrackPreset {
+		log.Printf("Task %s: routing is %q, ignoring trackPreset", taskID, routing)
+		publishMarker(ctx, pub, "Routing is disabled, ignoring track preset")
+	}
+
 	// Create work directory
 	workDir, err := CreateWorkDir(taskID)
 	if err != nil {
@@ -752,6 +778,20 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		return "", nil, fmt.Errorf("failed to write layout file: %w", err)
 	}
 
+	// Write the switch preset next to the build log. kbplacer splits --diode
+	// on whitespace, and the project directory is named after the layout, so
+	// it may contain spaces, while the logs directory has a fixed name.
+	diodePresetPath := ""
+	if useTrackPreset {
+		diodePresetPath = filepath.Join(logDir, "switch-preset.json")
+		if strings.ContainsAny(diodePresetPath, " \t\n") {
+			return "", nil, fmt.Errorf("switch preset path must not contain whitespace: %q", diodePresetPath)
+		}
+		if err := WriteSwitchPresetFile(diodePresetPath, trackPreset, diodePositionX, diodePositionY, diodeRotationInt, diodeSide); err != nil {
+			return "", nil, err
+		}
+	}
+
 	// Run kbplacer to generate PCB and schematic
 	if err := RunKBPlacer(ctx, KBPlacerOptions{
 		PCBPath:                 pcbFile,
@@ -767,6 +807,7 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		DiodeSide:               diodeSide,
 		DiodePositionX:          diodePositionX,
 		DiodePositionY:          diodePositionY,
+		DiodePresetPath:         diodePresetPath,
 		CreateLedPcbElements:    createLedPcbElements,
 		CreateLedSchFile:        createLedSchFile,
 		LedFootprint:            ledFootprint,

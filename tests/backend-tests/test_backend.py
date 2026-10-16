@@ -5,6 +5,9 @@ import pytest
 import random
 import re
 import requests
+import shlex
+import subprocess
+import tempfile
 import time
 import zipfile
 
@@ -527,6 +530,289 @@ def test_incorrect_layout(tmpdir, pcb_endpoint):
     assert (
         "invalid layout metadata" in str(task_result).lower()
     ), f"Expected validation error, got: {task_result}"
+
+
+# Track preset tests
+#
+# settings.trackPreset is a switch-local track template (integer nanometres)
+# that kbplacer replicates to every switch-diode pair, see kicad-kbplacer's
+# docs/switch-preset.schema.json. This is the kle-ng default preset: SW pad 2
+# to D pad 2 (A) of an MX switch with a SOD-123F diode at `5.08 4 90 BACK`
+# (DEFAULT_SETTINGS), on B.Cu between the switch centre and right side holes.
+TRACK_PRESET_WIDTH_MM = 0.25
+DEFAULT_TRACK_PRESET = {
+    "version": 1,
+    "items": [
+        {
+            "type": "track",
+            "start": {"x_nm": 2540000, "y_nm": -5080000},
+            "end": {"x_nm": 2540000, "y_nm": 60000},
+            "width_nm": 250000,
+            "layer": "B.Cu",
+        },
+        {
+            "type": "track",
+            "start": {"x_nm": 2540000, "y_nm": 60000},
+            "end": {"x_nm": 5080000, "y_nm": 2600000},
+            "width_nm": 250000,
+            "layer": "B.Cu",
+        },
+    ],
+}
+
+
+def parse_sexpr(text):
+    """Parses KiCad s-expression text into nested lists of strings."""
+    tokens = re.findall(r'\(|\)|"(?:[^"\\]|\\.)*"|[^\s()]+', text)
+    stack = [[]]
+    for token in tokens:
+        if token == "(":
+            stack.append([])
+        elif token == ")":
+            node = stack.pop()
+            stack[-1].append(node)
+        elif token.startswith('"'):
+            stack[-1].append(json.loads(token))
+        else:
+            stack[-1].append(token)
+    return stack[0][0]
+
+
+def sexpr_children(node, name):
+    return [c for c in node if isinstance(c, list) and c and c[0] == name]
+
+
+def sexpr_child(node, name):
+    children = sexpr_children(node, name)
+    return children[0] if children else None
+
+
+def read_board(zip_path, expected_name="keyboard"):
+    with zipfile.ZipFile(zip_path, "r") as result:
+        text = result.read(f"{expected_name}/{expected_name}.kicad_pcb").decode()
+    return parse_sexpr(text)
+
+
+def board_segments_by_net(board):
+    """Maps net name to the list of segment widths (mm) on that net."""
+    # KiCad 9 boards reference nets by number, KiCad 10 boards by name
+    net_names = {n[1]: n[2] for n in sexpr_children(board, "net") if len(n) == 3}
+    segments = {}
+    for segment in sexpr_children(board, "segment"):
+        net = sexpr_child(segment, "net")[1]
+        net = net_names.get(net, net)
+        segments.setdefault(net, []).append(float(sexpr_child(segment, "width")[1]))
+    return segments
+
+
+def board_footprint_positions(board, prefix):
+    """Maps reference (e.g. D1) to the footprint (at x y rot) and layer."""
+    positions = {}
+    for footprint in sexpr_children(board, "footprint"):
+        reference = next(
+            p[2]
+            for p in sexpr_children(footprint, "property")
+            if p[1] == "Reference"
+        )
+        if re.fullmatch(rf"{prefix}\d+", reference):
+            at = [float(v) for v in sexpr_child(footprint, "at")[1:]]
+            if len(at) == 2:
+                at.append(0.0)
+            layer = sexpr_child(footprint, "layer")[1]
+            positions[reference] = (at, layer)
+    return positions
+
+
+def run_drc(kicad_cli, drc_image, zip_path, expected_name="keyboard"):
+    """Runs kicad-cli DRC on the generated board, returns the JSON report.
+
+    Without a local kicad_cli the board is piped into a drc_image container and
+    the report is read back from its stdout, so no bind mounts are needed (the
+    docker daemon may not see the test's tmpdir).
+    """
+    with zipfile.ZipFile(zip_path, "r") as result:
+        pcb = result.read(f"{expected_name}/{expected_name}.kicad_pcb")
+    drc_args = ["pcb", "drc", "--format", "json"]
+    if kicad_cli:
+        logger.warning("Running DRC with a local kicad-cli, its KiCad version may differ from the worker's")
+        with tempfile.TemporaryDirectory() as tmp:
+            board = os.path.join(tmp, "board.kicad_pcb")
+            report = os.path.join(tmp, "report.json")
+            with open(board, "wb") as f:
+                f.write(pcb)
+            subprocess.run(shlex.split(kicad_cli) + drc_args + ["-o", report, board], check=True)
+            with open(report) as f:
+                return json.load(f)
+
+    script = (
+        "mkdir -p /tmp/drc && cat > /tmp/drc/board.kicad_pcb"
+        f" && kicad-cli {' '.join(drc_args)} -o /tmp/drc/report.json /tmp/drc/board.kicad_pcb >&2"
+        " && cat /tmp/drc/report.json"
+    )
+    cmd = ["docker", "run", "--rm", "-i", "--entrypoint", "sh", drc_image, "-c", script]
+    logger.info(f"Running DRC in {drc_image}")
+    # kicad-cli exits with 0 even when violations are found (no --exit-code-violations)
+    result = subprocess.run(cmd, input=pcb, stdout=subprocess.PIPE, check=True)
+    return json.loads(result.stdout)
+
+
+def assert_preset_routed(tmpdir, board, kicad_cli, drc_image):
+    diodes = board_footprint_positions(board, "D")
+    switches = board_footprint_positions(board, "SW")
+    assert diodes and len(diodes) == len(switches), (diodes, switches)
+
+    # every switch-diode net is routed, and only by the preset (the built-in
+    # router uses the board's default 0.2 mm width)
+    segments = board_segments_by_net(board)
+    for reference in diodes:
+        widths = segments.get(f"Net-({reference}-A)")
+        assert widths, f"{reference}: no tracks on Net-({reference}-A)"
+        assert all(w == TRACK_PRESET_WIDTH_MM for w in widths), (reference, widths)
+
+    with zipfile.ZipFile(tmpdir / "result.zip", "r") as result:
+        build_log = result.read("logs/build.log").decode()
+        preset_file = json.loads(result.read("logs/switch-preset.json"))
+    assert "Loading connection preset from" in build_log
+    for warning in [
+        "Could not add track segment",
+        "template elements could not be placed",
+        "Switch-diode template did not connect",
+        "Switch-diode template connects pads of different nets",
+    ]:
+        assert warning not in build_log, f"'{warning}' found in build log"
+    assert preset_file["items"] == DEFAULT_TRACK_PRESET["items"]
+    assert preset_file["diodes"] == [
+        {"position": {"x_nm": 5080000, "y_nm": 4000000}, "orientation_deg": 90, "layer": "B.Cu"}
+    ]
+
+    drc = run_drc(kicad_cli, drc_image, tmpdir / "result.zip")
+    logger.info(f"DRC KiCad version: {drc.get('kicad_version')}")
+    bad = [
+        v
+        for v in drc["violations"]
+        if v["type"] in ("shorting_items", "clearance", "tracks_crossing", "hole_clearance")
+    ]
+    assert not bad, f"DRC violations: {bad}"
+    unconnected_sw_d = [
+        u
+        for u in drc["unconnected_items"]
+        if any("[Net-(D" in item["description"] for item in u["items"])
+    ]
+    assert not unconnected_sw_d, f"Unconnected switch-diode items: {unconnected_sw_d}"
+
+
+def test_track_preset(request, tmpdir, pcb_endpoint, kicad_cli, drc_image):
+    """A track preset is replicated to every switch-diode pair, on rotated keys
+    and on larger keys with stabilizers, and the diodes are placed exactly as
+    with the CUSTOM diode position."""
+    filename = request.module.__file__
+    test_dir, _ = os.path.splitext(filename)
+    layout_file = f"{test_dir}/preset_rotations_internal.json"
+
+    settings = dict(DEFAULT_SETTINGS)
+    settings["stabilizerFootprint"] = "Mounting_Keyboard_Stabilizer:Stabilizer_Cherry_MX_{:.2f}u"
+
+    custom_dir = tmpdir / "custom"
+    custom_dir.mkdir()
+    layout_test_steps(custom_dir, pcb_endpoint, layout_file, settings)
+    custom_board = read_board(custom_dir / "result.zip")
+
+    settings["trackPreset"] = DEFAULT_TRACK_PRESET
+    layout_test_steps(tmpdir, pcb_endpoint, layout_file, settings)
+    board = read_board(tmpdir / "result.zip")
+
+    preset_diodes = board_footprint_positions(board, "D")
+    custom_diodes = board_footprint_positions(custom_board, "D")
+    assert preset_diodes.keys() == custom_diodes.keys()
+    for reference, (at, layer) in preset_diodes.items():
+        custom_at, custom_layer = custom_diodes[reference]
+        assert layer == custom_layer, reference
+        assert at == pytest.approx(custom_at, abs=1e-4), reference
+
+    assert_preset_routed(tmpdir, board, kicad_cli, drc_image)
+
+
+def test_track_preset_ignored_when_routing_disabled(request, tmpdir, pcb_endpoint):
+    filename = request.module.__file__
+    test_dir, _ = os.path.splitext(filename)
+    layout_file = f"{test_dir}/2x2_internal.json"
+
+    settings = dict(DEFAULT_SETTINGS)
+    settings["routing"] = "Disabled"
+    settings["trackPreset"] = DEFAULT_TRACK_PRESET
+    layout_test_steps(tmpdir, pcb_endpoint, layout_file, settings)
+
+    with zipfile.ZipFile(tmpdir / "result.zip", "r") as result:
+        assert "logs/switch-preset.json" not in result.namelist()
+    assert not board_segments_by_net(read_board(tmpdir / "result.zip"))
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        # format errors are reported by kbplacer
+        (
+            {"trackPreset": {"version": 2, "items": DEFAULT_TRACK_PRESET["items"]}},
+            "$.version: unsupported version 2",
+        ),
+        (
+            {"trackPreset": {"version": 1, "items": []}},
+            "$.items: expected non-empty array",
+        ),
+        (
+            {"trackPreset": {"version": 1, "items": [{"type": "arc"}]}},
+            "$.items[0]: arc tracks are not supported yet",
+        ),
+        (
+            {
+                "trackPreset": {
+                    "version": 1,
+                    "items": [
+                        dict(DEFAULT_TRACK_PRESET["items"][0], start={"x_nm": 0.5, "y_nm": 0})
+                    ],
+                }
+            },
+            "$.items[0].start.x_nm: expected integer nanometres, got 0.5",
+        ),
+        (
+            {
+                "trackPreset": {
+                    "version": 1,
+                    "items": [dict(DEFAULT_TRACK_PRESET["items"][0], layer="In1.Cu")],
+                }
+            },
+            "$.items[0].layer: expected one of F.Cu, B.Cu, got 'In1.Cu'",
+        ),
+        (
+            {"trackPreset": DEFAULT_TRACK_PRESET, "switchSide": "BACK"},
+            "JSON switch presets support only front side switches",
+        ),
+        # diode placement belongs to the diode settings, checked by the backend
+        (
+            {"trackPreset": dict(DEFAULT_TRACK_PRESET, diodes=[])},
+            "invalid trackPreset: diodes must not be set",
+        ),
+    ],
+)
+def test_invalid_track_preset(request, pcb_endpoint, overrides, expected):
+    """Invalid presets fail the task with the validation message."""
+    # a valid layout, so that kbplacer gets as far as reading the preset
+    filename = request.module.__file__
+    test_dir, _ = os.path.splitext(filename)
+    with open(f"{test_dir}/2x2_internal.json") as f:
+        layout_json = json.load(f)
+    settings = dict(DEFAULT_SETTINGS)
+    settings.update(overrides)
+    request_data = {"layout": layout_json, "settings": settings}
+
+    results = [None]
+    run_pcb_task(pcb_endpoint, request_data, results, 0)
+
+    assert results[0]
+    task_done, task_result = results[0][1], results[0][2]
+    assert task_done == True, "Task should complete (with failure)"
+    error_msg = str(task_result.get("error"))
+    assert expected in error_msg, error_msg
 
 
 # Error Details Tests

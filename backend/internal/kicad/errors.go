@@ -23,6 +23,10 @@ var (
 	ErrMissingDiodePositionX = errors.New("missing required field: diodePositionX")
 	ErrMissingDiodePositionY = errors.New("missing required field: diodePositionY")
 
+	// Track preset errors. Details are appended when the error is raised. The
+	// preset format itself is validated by kbplacer.
+	ErrInvalidTrackPreset = errors.New("invalid trackPreset")
+
 	// LED chain configuration errors
 	ErrMissingLedFootprint          = errors.New("missing required field: ledFootprint (required when createLedSchFile is enabled)")
 	ErrMissingLedCapacitorFootprint = errors.New("missing required field: ledCapacitorFootprint (required when createLedSchFile is enabled unless skipLedDecoupling is set)")
