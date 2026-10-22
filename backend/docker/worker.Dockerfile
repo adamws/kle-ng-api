@@ -48,7 +48,7 @@ RUN cd /kicad/.local/share/kicad/9.0/3rdparty \
 COPY ./docker/LED_SK6812MINI-E_3.2x2.8mm_P1.5mm_ReverseMount.kicad_mod /usr/share/kicad/footprints/LED_SMD.pretty/
 
 # Install kbplacer Python package (still needed for subprocess calls)
-ARG KBPLACER_VERSION=ccdda0035dee94f49cd1338209312d5d1d1729df
+ARG KBPLACER_VERSION=v0.20
 RUN pip3 install --upgrade pip \
   && pip3 install "git+https://github.com/adamws/kicad-kbplacer@$KBPLACER_VERSION#egg=kbplacer[schematic]"
 
