@@ -113,6 +113,8 @@ services:
     restart: unless-stopped
     env_file:
       - production.env
+    volumes:
+      - "./failed-tasks:/failed-tasks"
     depends_on:
       - redis
       - s3

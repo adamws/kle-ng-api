@@ -10,11 +10,13 @@ fi
 
 SCRIPT_DIR="$(dirname "${0}")"
 
-rsync -avP --exclude="letsencrypt" --exclude=".env" \
+rsync -avP --exclude="letsencrypt" --exclude=".env" --exclude="failed-tasks" \
   ${SCRIPT_DIR}/ $SSH_USER@$SSH_HOST:/home/$SSH_USER/app
 
 ssh $SSH_USER@$SSH_HOST << EOF
     cd app
+    # Worker runs as uid 1000, it must be able to write here
+    mkdir -p failed-tasks && chmod 777 failed-tasks
     export TAG=$TAG
     docker compose down -v --rmi="all"
     docker compose pull

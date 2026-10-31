@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"time"
 
 	"backend/internal/common"
+	"backend/internal/failedtasks"
 	"backend/internal/kicad"
 	"backend/internal/logstream"
 
@@ -27,9 +30,10 @@ func (w *Worker) RegisterTasks() {
 }
 
 // HandleGenerateKicadProject is the asynq task handler for KiCad project generation
-func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Task) error {
+func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Task) (err error) {
 	// Extract task ID (asynq provides this via task metadata)
 	taskID := task.ResultWriter().TaskID()
+	startedAt := time.Now()
 
 	log.Printf("[Task %s] Starting KiCad project generation", taskID)
 
@@ -52,6 +56,16 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 		_ = pub.PublishEnd(endCtx, buildStatus)
 	}()
 
+	// Keep the failed task (request, error, build logs) for troubleshooting.
+	// Registered before the panic-recovery defer so a recovered panic, which
+	// sets err, is recorded too.
+	var workDir string
+	defer func() {
+		if err != nil {
+			w.saveFailedTask(task, err, startedAt, workDir)
+		}
+	}()
+
 	// Update progress: Starting
 	if err := w.reportProgress(task, "Initializing task"); err != nil {
 		log.Printf("[Task %s] Failed to report progress: %v", taskID, err)
@@ -65,6 +79,7 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 
 			// Report error progress
 			w.reportProgress(task, fmt.Sprintf("Panic: %v", r))
+			err = fmt.Errorf("panic: %v", r)
 		}
 	}()
 
@@ -83,7 +98,8 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	_ = pub.PublishLine(ctx, logstream.SourceWorker, "Generating KiCad PCB files")
 
 	// Generate KiCad project (pass context for cancellation support)
-	workDir, files, err := kicad.NewPCB(ctx, taskID, taskRequest, pub)
+	var files *common.ProjectFiles
+	workDir, files, err = kicad.NewPCB(ctx, taskID, taskRequest, pub)
 	if err != nil {
 		log.Printf("[Task %s] PCB generation failed: %v", taskID, err)
 		errMsg := fmt.Sprintf("PCB generation failed: %v", err)
@@ -119,6 +135,31 @@ func (w *Worker) HandleGenerateKicadProject(ctx context.Context, task *asynq.Tas
 	log.Printf("[Task %s] Task completed successfully", taskID)
 	buildStatus = "success"
 	return nil
+}
+
+// saveFailedTask stores the failed task in the failed tasks directory. It is
+// best-effort: errors are logged and never change the task outcome.
+func (w *Worker) saveFailedTask(task *asynq.Task, taskErr error, startedAt time.Time, workDir string) {
+	taskID := task.ResultWriter().TaskID()
+	rec := failedtasks.Record{
+		TaskID:    taskID,
+		TaskType:  task.Type(),
+		Payload:   task.Payload(),
+		Err:       taskErr,
+		StartedAt: startedAt,
+		Env: map[string]string{
+			"kbplacerVersion": os.Getenv("KBPLACER_VERSION"),
+		},
+	}
+	if workDir != "" {
+		rec.LogDir = filepath.Join(workDir, "logs")
+	}
+	path, err := w.failedTasks.Save(rec)
+	if err != nil {
+		log.Printf("[Task %s] Failed to save failed task: %v", taskID, err)
+	} else if path != "" {
+		log.Printf("[Task %s] Failed task saved to %s", taskID, path)
+	}
 }
 
 // reportProgress writes a progress message to the task's result writer

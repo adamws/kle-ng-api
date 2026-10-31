@@ -46,6 +46,10 @@ services:
       - WORKER_CONCURRENCY=10
       - QUEUE_NAME=kicad
       - FILER_URL=http://s3:8888
+      - FAILED_TASKS_DIR=/failed-tasks
+      - FAILED_TASKS_LIMIT=10
+    volumes:
+      - failed_tasks:/failed-tasks
     depends_on:
       - redis
       - s3
@@ -79,3 +83,4 @@ services:
 
 volumes:
   s3_data:
+  failed_tasks:

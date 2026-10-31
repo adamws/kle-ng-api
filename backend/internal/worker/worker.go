@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"backend/internal/failedtasks"
 	"backend/internal/storage"
 
 	"github.com/hibiken/asynq"
@@ -19,6 +20,7 @@ type Worker struct {
 	mux           *asynq.ServeMux
 	filerUploader *storage.FilerUploader
 	redisClient   *redis.Client
+	failedTasks   *failedtasks.Store
 	config        Config
 }
 
@@ -76,6 +78,15 @@ func NewWorker() *Worker {
 	})
 
 	log.Println("Redis log-stream client created")
+
+	// Store for the last N failed tasks (nil when disabled)
+	failedTasks := failedtasks.New(config.FailedTasksDir, config.FailedTasksLimit)
+	if failedTasks != nil {
+		log.Printf("Keeping last %d failed tasks in %s", config.FailedTasksLimit, config.FailedTasksDir)
+	} else {
+		log.Println("Failed task storage disabled")
+	}
+
 	log.Println("Worker initialized successfully")
 
 	return &Worker{
@@ -83,6 +94,7 @@ func NewWorker() *Worker {
 		mux:           mux,
 		filerUploader: filerUploader,
 		redisClient:   redisClient,
+		failedTasks:   failedTasks,
 		config:        config,
 	}
 }

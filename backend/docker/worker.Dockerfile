@@ -25,6 +25,10 @@ RUN groupadd -g $GID -o kicad \
   && useradd -u $UID -g $GID --create-home --shell /bin/bash kicad \
   && usermod -m -d /kicad kicad
 
+# Failed task storage (FAILED_TASKS_DIR), owned by kicad so a named volume
+# mounted here is writable
+RUN mkdir /failed-tasks && chown kicad:kicad /failed-tasks
+
 USER kicad
 WORKDIR /kicad
 
@@ -49,6 +53,8 @@ COPY ./docker/LED_SK6812MINI-E_3.2x2.8mm_P1.5mm_ReverseMount.kicad_mod /usr/shar
 
 # Install kbplacer Python package (still needed for subprocess calls)
 ARG KBPLACER_VERSION=v0.20
+# Recorded in failed task entries (see FAILED_TASKS_DIR)
+ENV KBPLACER_VERSION=$KBPLACER_VERSION
 RUN pip3 install --upgrade pip \
   && pip3 install "git+https://github.com/adamws/kicad-kbplacer@$KBPLACER_VERSION#egg=kbplacer[schematic]"
 

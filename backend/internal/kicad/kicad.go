@@ -561,6 +561,9 @@ func parsePlacement(settings map[string]interface{}, prefix string) (int, string
 // the work directory and a manifest of the generated artifacts (PCB renders and
 // one SVG per schematic sheet) so the caller can upload them and report the list
 // of available files to the frontend.
+//
+// On failure the work directory is still returned once it has been created
+// (empty otherwise), so the caller can preserve its logs for troubleshooting.
 func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface{}, pub *logstream.Publisher) (string, *common.ProjectFiles, error) {
 	startTime := time.Now()
 
@@ -759,7 +762,7 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	// Get project name from layout metadata
 	meta, ok := layout["meta"].(map[string]interface{})
 	if !ok {
-		return "", nil, ErrInvalidLayoutMetadata
+		return workDir, nil, ErrInvalidLayoutMetadata
 	}
 	layoutName, _ := meta["name"].(string)
 	projectName := GetProjectName(layoutName)
@@ -767,13 +770,13 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	// Create project directory
 	projectFullPath, err := CreateKicadWorkDir(workDir, projectName)
 	if err != nil {
-		return "", nil, err
+		return workDir, nil, err
 	}
 
 	// Create log directory
 	logDir, err := CreateLogDir(workDir)
 	if err != nil {
-		return "", nil, err
+		return workDir, nil, err
 	}
 	logPath := filepath.Join(logDir, "build.log")
 
@@ -785,10 +788,10 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	// Write layout JSON file
 	layoutJSON, err := json.MarshalIndent(layout, "", "  ")
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to marshal layout JSON: %w", err)
+		return workDir, nil, fmt.Errorf("failed to marshal layout JSON: %w", err)
 	}
 	if err := os.WriteFile(layoutFile, layoutJSON, 0644); err != nil {
-		return "", nil, fmt.Errorf("failed to write layout file: %w", err)
+		return workDir, nil, fmt.Errorf("failed to write layout file: %w", err)
 	}
 
 	// Write the switch preset next to the build log. kbplacer splits --diode
@@ -798,10 +801,10 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	if useTrackPreset {
 		diodePresetPath = filepath.Join(logDir, "switch-preset.json")
 		if strings.ContainsAny(diodePresetPath, " \t\n") {
-			return "", nil, fmt.Errorf("switch preset path must not contain whitespace: %q", diodePresetPath)
+			return workDir, nil, fmt.Errorf("switch preset path must not contain whitespace: %q", diodePresetPath)
 		}
 		if err := WriteSwitchPresetFile(diodePresetPath, trackPreset, diodePositionX, diodePositionY, diodeRotationInt, diodeSide); err != nil {
-			return "", nil, err
+			return workDir, nil, err
 		}
 	}
 
@@ -835,12 +838,12 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 		LedCapacitorPositionX:   ledCapacitorPositionX,
 		LedCapacitorPositionY:   ledCapacitorPositionY,
 	}, logPath, pub); err != nil {
-		return "", nil, err
+		return workDir, nil, err
 	}
 
 	// Bundle switch and stabilizer footprints
 	if err := BundleFootprintLibraries(projectFullPath, bundledLibNicknames); err != nil {
-		return "", nil, err
+		return workDir, nil, err
 	}
 
 	// Generate schematic image(s). Multi-sheet projects (e.g. the LED chain)
@@ -850,13 +853,13 @@ func NewPCB(ctx context.Context, taskID string, taskRequest map[string]interface
 	publishMarker(ctx, pub, "Generating schematic image")
 	schematicRenders, err := GenerateSchematicImage(ctx, schFile, logPath)
 	if err != nil {
-		return "", nil, err
+		return workDir, nil, err
 	}
 
 	// Generate renders
 	publishMarker(ctx, pub, "Generating PCB renders")
 	if err := GenerateRender(ctx, pcbFile, logPath); err != nil {
-		return "", nil, err
+		return workDir, nil, err
 	}
 
 	// Assemble the artifact manifest: the PCB front/back renders followed by

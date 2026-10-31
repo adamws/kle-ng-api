@@ -12,6 +12,11 @@ type Config struct {
 	Concurrency   int
 	QueueName     string
 	FilerURL      string
+
+	// FailedTasksDir is where the last FailedTasksLimit failed tasks are kept
+	// for troubleshooting. An empty value disables it.
+	FailedTasksDir   string
+	FailedTasksLimit int
 }
 
 // LoadConfig loads configuration from environment variables
@@ -23,5 +28,8 @@ func LoadConfig() Config {
 		Concurrency:   common.GetIntOrDefault("WORKER_CONCURRENCY", 10),
 		QueueName:     common.GetenvOrDefault("QUEUE_NAME", "kicad"),
 		FilerURL:      common.GetenvOrDefault("FILER_URL", "http://localhost:8888"),
+
+		FailedTasksDir:   common.GetenvOrDefault("FAILED_TASKS_DIR", ""),
+		FailedTasksLimit: common.GetIntOrDefault("FAILED_TASKS_LIMIT", 10),
 	}
 }
